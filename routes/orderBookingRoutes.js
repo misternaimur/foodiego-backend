@@ -1,0 +1,88 @@
+const express = require("express");
+const OrderBooking = require("../models/OrderBooking");
+
+// ============================================================
+// THIS IS THE ORDER BOOKING CRUD API
+// ------------------------------------------------------------
+// Create / read / update / delete food orders that live in the
+// "orderBooking" collection. Each order links a customer (User),
+// a restaurant (Restaurant), and optionally a rider (Rider) once
+// one has been assigned to deliver it.
+// ============================================================
+const router = express.Router();
+
+// --- STEP 1: Create an order (a customer places a booking) --------
+// POST /api/orders
+router.post("/", async (req, res) => {
+  try {
+    const order = await OrderBooking.create(req.body);
+    res.status(201).json({ success: true, data: order });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// --- STEP 2: Get every order -----------------------------------------
+// GET /api/orders
+router.get("/", async (req, res) => {
+  try {
+    const orders = await OrderBooking.find()
+      .populate("customerId", "name email")
+      .populate("restaurantId", "restaurantName")
+      .populate("riderId", "name")
+      .sort({ createdAt: -1 });
+    res.status(200).json({ success: true, count: orders.length, data: orders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// --- STEP 3: Get a single order by id -----------------------------------
+// GET /api/orders/:id
+router.get("/:id", async (req, res) => {
+  try {
+    const order = await OrderBooking.findById(req.params.id)
+      .populate("customerId", "name email")
+      .populate("restaurantId", "restaurantName")
+      .populate("riderId", "name");
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+    res.status(200).json({ success: true, data: order });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// --- STEP 4: Update an order (e.g. change status, assign a rider) ---------
+// PUT /api/orders/:id
+router.put("/:id", async (req, res) => {
+  try {
+    const order = await OrderBooking.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+    res.status(200).json({ success: true, data: order });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// --- STEP 5: Delete/cancel an order ----------------------------------------
+// DELETE /api/orders/:id
+router.delete("/:id", async (req, res) => {
+  try {
+    const order = await OrderBooking.findByIdAndDelete(req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+    res.status(200).json({ success: true, message: "Order deleted" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+module.exports = router;
