@@ -40,15 +40,18 @@ app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
 
-const PORT = process.env.PORT || 8000;
+connectDB().catch((error) => {
+  console.error("Failed to connect to MongoDB:", error.message);
+});
 
-connectDB()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
-    });
-  })
-  .catch((error) => {
-    console.error("Failed to start server:", error.message);
-    process.exit(1);
+// Only bind a port for local/nodemon dev. On Vercel this file is required
+// as a serverless function module, so it must export `app` instead of
+// listening on a port itself.
+if (require.main === module) {
+  const PORT = process.env.PORT || 8000;
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
   });
+}
+
+module.exports = app;
