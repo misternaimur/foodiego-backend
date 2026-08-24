@@ -1,6 +1,8 @@
 const express = require("express");
 const OrderBooking = require("../models/OrderBooking");
 const MenuItem = require("../models/MenuItem");
+const Restaurant = require("../models/Restaurant");
+const { protect } = require("../middleware/auth");
 
 // ============================================================
 // THIS IS THE ORDER BOOKING CRUD API
@@ -97,6 +99,54 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
     res.status(200).json({ success: true, message: "Order deleted" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// --- STEP 6: Get orders for a specific restaurant -------------------
+// GET /api/orders/restaurant/:restaurantId
+router.get("/restaurant/:restaurantId", protect, async (req, res) => {
+  try {
+    const restaurant = await Restaurant.findById(req.params.restaurantId);
+    if (!restaurant) {
+      return res.status(404).json({ success: false, message: "Restaurant not found" });
+    }
+    if (restaurant.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ success: false, message: "Not authorized to view this restaurant's orders" });
+    }
+
+    const orders = await OrderBooking.find({ restaurantId: req.params.restaurantId })
+      .populate("customerId", "name email")
+      .populate("riderId", "name")
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({ success: true, count: orders.length, data: orders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// --- STEP 7: Update order status --------------------------------------
+// PUT /api/orders/:id/status
+router.put("/:id/status", protect, async (req, res) => {
+  try {
+    const order = await OrderBooking.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+
+    const restaurant = await Restaurant.findById(order.restaurantId);
+    if (!restaurant || restaurant.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ success: false, message: "Not authorized to update this order's status" });
+    }
+
+    if (req.body.status) {
+      order.status = req.body.status;
+      await order.save();
+    }
+
+    res.status(200).json({ success: true, data: order });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
