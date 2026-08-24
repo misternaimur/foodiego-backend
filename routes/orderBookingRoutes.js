@@ -1,5 +1,6 @@
 const express = require("express");
 const OrderBooking = require("../models/OrderBooking");
+const MenuItem = require("../models/MenuItem");
 
 // ============================================================
 // THIS IS THE ORDER BOOKING CRUD API
@@ -15,6 +16,22 @@ const router = express.Router();
 // POST /api/orders
 router.post("/", async (req, res) => {
   try {
+    const { items } = req.body;
+    if (items && Array.isArray(items)) {
+      for (const item of items) {
+        if (!item.menuItemId) {
+          return res.status(400).json({ success: false, message: "Missing menuItemId in order item" });
+        }
+        const menuItem = await MenuItem.findById(item.menuItemId);
+        if (!menuItem) {
+          return res.status(400).json({ success: false, message: `Invalid menuItemId: ${item.menuItemId}` });
+        }
+        if (menuItem.isAvailable === false) {
+          return res.status(400).json({ success: false, message: `Item is unavailable: ${menuItem.name}` });
+        }
+      }
+    }
+
     const order = await OrderBooking.create(req.body);
     res.status(201).json({ success: true, data: order });
   } catch (error) {
