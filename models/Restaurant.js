@@ -15,6 +15,8 @@ const restaurantSchema = new mongoose.Schema(
     email: { type: String, required: true, trim: true, lowercase: true },
     phone: { type: String, trim: true },
     address: { type: String, required: true, trim: true },
+    description: { type: String, trim: true },
+    logoUrl: { type: String, trim: true },
     cuisineType: { type: String, trim: true },
     openingTime: { type: String, trim: true }, // e.g. "09:00"
     closingTime: { type: String, trim: true }, // e.g. "22:00"
