@@ -26,7 +26,7 @@ router.post("/", protect, async (req, res) => {
 // GET /api/menu/restaurant/:restaurantId
 router.get("/restaurant/:restaurantId", async (req, res) => {
   try {
-    const menuItems = await MenuItem.find({ restaurantId: req.params.restaurantId });
+    const menuItems = await MenuItem.find({ restaurantId: req.params.restaurantId, isActive: { $ne: false } });
     res.status(200).json({ success: true, count: menuItems.length, data: menuItems });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -84,6 +84,74 @@ router.delete("/:id", protect, async (req, res) => {
 
     await MenuItem.findByIdAndDelete(req.params.id);
     res.status(200).json({ success: true, message: "Menu item deleted" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PATCH /api/menu/:id/deactivate
+router.patch("/:id/deactivate", protect, async (req, res) => {
+  try {
+    const menuItem = await MenuItem.findById(req.params.id);
+    if (!menuItem) {
+      return res.status(404).json({ success: false, message: "Menu item not found" });
+    }
+
+    const restaurant = await Restaurant.findById(menuItem.restaurantId);
+    if (!restaurant || restaurant.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ success: false, message: "Not authorized to modify this item" });
+    }
+
+    menuItem.isActive = false;
+    await menuItem.save();
+    res.status(200).json({ success: true, data: menuItem });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PATCH /api/menu/:id/activate
+router.patch("/:id/activate", protect, async (req, res) => {
+  try {
+    const menuItem = await MenuItem.findById(req.params.id);
+    if (!menuItem) {
+      return res.status(404).json({ success: false, message: "Menu item not found" });
+    }
+
+    const restaurant = await Restaurant.findById(menuItem.restaurantId);
+    if (!restaurant || restaurant.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ success: false, message: "Not authorized to modify this item" });
+    }
+
+    menuItem.isActive = true;
+    await menuItem.save();
+    res.status(200).json({ success: true, data: menuItem });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PATCH /api/menu/:id/availability
+router.patch("/:id/availability", protect, async (req, res) => {
+  try {
+    const { isAvailable } = req.body;
+    if (typeof isAvailable !== "boolean") {
+      return res.status(400).json({ success: false, message: "isAvailable must be a boolean" });
+    }
+
+    const menuItem = await MenuItem.findById(req.params.id);
+    if (!menuItem) {
+      return res.status(404).json({ success: false, message: "Menu item not found" });
+    }
+
+    const restaurant = await Restaurant.findById(menuItem.restaurantId);
+    if (!restaurant || restaurant.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ success: false, message: "Not authorized to modify this item" });
+    }
+
+    menuItem.isAvailable = isAvailable;
+    await menuItem.save();
+    res.status(200).json({ success: true, data: menuItem });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

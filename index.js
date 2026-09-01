@@ -10,6 +10,7 @@ const restaurantRoutes = require("./routes/restaurantRoutes");
 const riderRoutes = require("./routes/riderRoutes");
 const orderBookingRoutes = require("./routes/orderBookingRoutes");
 const menuRoutes = require("./routes/menuRoutes");
+const categoryRoutes = require("./routes/categoryRoutes");
 
 // ============================================================
 // APP ENTRY POINT
@@ -34,6 +35,7 @@ app.use("/api/restaurants", restaurantRoutes); // restaurant collection
 app.use("/api/riders", riderRoutes); // rider collection
 app.use("/api/orders", orderBookingRoutes); // orderBooking collection
 app.use("/api/menu", menuRoutes); // menu collection
+app.use("/api/categories", categoryRoutes); // category collection
 
 // Catch-all for unknown routes.
 app.use((req, res) => {

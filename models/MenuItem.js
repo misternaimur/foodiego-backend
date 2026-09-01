@@ -22,11 +22,14 @@ const menuItemSchema = new mongoose.Schema(
       min: 0,
     },
     category: {
-      type: String,
-      trim: true,
-      default: "General",
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Category",
     },
     isAvailable: {
+      type: Boolean,
+      default: true,
+    },
+    isActive: {
       type: Boolean,
       default: true,
     },
