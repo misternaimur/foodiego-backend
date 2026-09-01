@@ -29,6 +29,10 @@ const menuItemSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
     imageUrl: {
       type: String,
       trim: true,
