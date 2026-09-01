@@ -131,4 +131,30 @@ router.patch("/:id/activate", protect, async (req, res) => {
   }
 });
 
+// PATCH /api/menu/:id/availability
+router.patch("/:id/availability", protect, async (req, res) => {
+  try {
+    const { isAvailable } = req.body;
+    if (typeof isAvailable !== "boolean") {
+      return res.status(400).json({ success: false, message: "isAvailable must be a boolean" });
+    }
+
+    const menuItem = await MenuItem.findById(req.params.id);
+    if (!menuItem) {
+      return res.status(404).json({ success: false, message: "Menu item not found" });
+    }
+
+    const restaurant = await Restaurant.findById(menuItem.restaurantId);
+    if (!restaurant || restaurant.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ success: false, message: "Not authorized to modify this item" });
+    }
+
+    menuItem.isAvailable = isAvailable;
+    await menuItem.save();
+    res.status(200).json({ success: true, data: menuItem });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 module.exports = router;
