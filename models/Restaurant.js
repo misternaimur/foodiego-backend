@@ -25,6 +25,22 @@ const restaurantSchema = new mongoose.Schema(
       default: "pending",
     },
     rating: { type: Number, default: 0, min: 0, max: 5 },
+    logoUrl: { type: String },
+    coverImageUrl: { type: String },
+    description: { type: String },
+    businessHours: [
+      {
+        day: { type: String },
+        openTime: { type: String },
+        closeTime: { type: String }
+      }
+    ],
+    operatingDays: [{ type: String }],
+    vendorStatus: {
+      type: String,
+      enum: ["open", "closed", "temporarily_closed"],
+      default: "open"
+    }
   },
   { timestamps: true }
 );
