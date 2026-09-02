@@ -48,6 +48,24 @@ router.get("/me", protect, async (req, res) => {
   }
 });
 
+// --- STEP 2.6: Update own restaurant profile --------------------
+// PUT /api/restaurants/me
+router.put("/me", protect, async (req, res) => {
+  try {
+    const restaurant = await Restaurant.findOneAndUpdate(
+      { userId: req.user.userId },
+      req.body,
+      { new: true, runValidators: true }
+    );
+    if (!restaurant) {
+      return res.status(404).json({ success: false, message: "Restaurant not found" });
+    }
+    res.status(200).json({ success: true, data: restaurant });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // --- STEP 3: Get a single restaurant by id --------------------------
 // GET /api/restaurants/:id
 router.get("/:id", async (req, res) => {
