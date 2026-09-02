@@ -1,25 +1,34 @@
+
 const express = require("express");
+const mongoose = require("mongoose");
 const Rider = require("../models/Rider");
 const OrderBooking = require("../models/OrderBooking");
 
-// ============================================================
-// THIS IS THE RIDER CRUD API
-// ------------------------------------------------------------
-// Create / read / update / delete delivery-rider profiles that
-// live in the "rider" collection. Each profile is linked to its
-// login account in the "users" collection via userId.
-// ============================================================
 const router = express.Router();
 
-// ============================================================
-// RIDER AVAILABLE ORDERS
-// ------------------------------------------------------------
-// Get orders that are ready to be accepted by a rider.
-// GET /api/riders/:id/orders/available
-// ============================================================
+/* ============================================================
+   HELPER
+============================================================ */
+
+const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+/* ============================================================
+   1. AVAILABLE ORDERS
+   GET /api/riders/:id/orders/available
+============================================================ */
+
 router.get("/:id/orders/available", async (req, res) => {
   try {
-    const rider = await Rider.findById(req.params.id);
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider ID",
+      });
+    }
+
+    const rider = await Rider.findById(id);
 
     if (!rider) {
       return res.status(404).json({
@@ -29,14 +38,16 @@ router.get("/:id/orders/available", async (req, res) => {
     }
 
     const orders = await OrderBooking.find({
-      riderId: null,
-      status: { $in: ["confirmed", "preparing"] },
+      $or: [{ riderId: null }, { riderId: { $exists: false } }],
+      status: {
+        $in: ["confirmed", "preparing"],
+      },
     })
-      .populate("customerId", "name email")
-      .populate("restaurantId", "restaurantName name")
+      .populate("customerId", "name email phone")
+      .populate("restaurantId", "restaurantName name address")
       .sort({ createdAt: -1 });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       count: orders.length,
       data: orders,
@@ -44,22 +55,35 @@ router.get("/:id/orders/available", async (req, res) => {
   } catch (error) {
     console.error("Available orders error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
 
-// ============================================================
-// ACCEPT ORDER
-// ------------------------------------------------------------
-// Rider accepts an available delivery order.
-// PUT /api/riders/:id/orders/:orderId/accept
-// ============================================================
-router.put("/:id/orders/:orderId/accept", async (req, res) => {
+/* ============================================================
+   2. GET RIDER DELIVERIES
+   THIS IS IMPORTANT FOR YOUR DELIVERIES PAGE
+
+   GET /api/riders/:id/deliveries
+============================================================ */
+
+router.get("/:id/deliveries", async (req, res) => {
   try {
-    const rider = await Rider.findById(req.params.id);
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider ID",
+      });
+    }
+
+    const rider = await Rider.findById(id).populate(
+      "userId",
+      "name email role"
+    );
 
     if (!rider) {
       return res.status(404).json({
@@ -68,14 +92,186 @@ router.put("/:id/orders/:orderId/accept", async (req, res) => {
       });
     }
 
-    if (!rider.isAvailable) {
+    const orders = await OrderBooking.find({
+      riderId: rider._id,
+    })
+      .populate("customerId", "name email phone")
+      .populate("restaurantId", "restaurantName name address")
+      .sort({ createdAt: -1 });
+
+    /* ---------------------------------------------------------
+       Convert database orders into delivery data
+    --------------------------------------------------------- */
+
+    const deliveries = orders.map((order) => {
+      let status = "Accepted";
+
+      if (order.status === "out_for_delivery") {
+        status = "In Progress";
+      }
+
+      if (order.status === "delivered") {
+        status = "Completed";
+      }
+
+      const customerName =
+        order.customerId?.name ||
+        order.customerName ||
+        "Customer";
+
+      const restaurantName =
+        order.restaurantId?.restaurantName ||
+        order.restaurantId?.name ||
+        order.restaurantName ||
+        "Restaurant";
+
+      const deliveryAddress =
+        order.deliveryAddress ||
+        order.shippingAddress ||
+        order.address ||
+        "Delivery address";
+
+      const distance = Number(order.deliveryDistance || 0);
+
+      let time = "—";
+
+      if (order.acceptedAt && order.deliveredAt) {
+        const start = new Date(order.acceptedAt).getTime();
+        const end = new Date(order.deliveredAt).getTime();
+
+        const minutes = Math.max(
+          0,
+          Math.round((end - start) / (1000 * 60))
+        );
+
+        time = `${minutes} min`;
+      } else if (order.estimatedDeliveryTime) {
+        time = `${order.estimatedDeliveryTime} min`;
+      }
+
+      return {
+        id: order._id,
+        orderId: order._id,
+
+        restaurant: restaurantName,
+        customer: customerName,
+
+        pickup:
+          restaurantName,
+
+        delivery:
+          deliveryAddress,
+
+        distance:
+          distance > 0 ? `${distance} km` : "—",
+
+        time,
+
+        payout:
+          Number(order.riderEarning || 0),
+
+        status,
+
+        rawStatus: order.status,
+
+        acceptedAt: order.acceptedAt || null,
+        pickedUpAt: order.pickedUpAt || null,
+        deliveredAt: order.deliveredAt || null,
+
+        totalAmount:
+          Number(order.totalAmount || 0),
+
+        customerPhone:
+          order.customerId?.phone ||
+          order.customerPhone ||
+          "",
+
+        restaurantAddress:
+          order.restaurantId?.address ||
+          "",
+      };
+    });
+
+    /* ---------------------------------------------------------
+       Statistics
+    --------------------------------------------------------- */
+
+    const activeDeliveries = deliveries.filter(
+      (delivery) => delivery.status === "In Progress"
+    );
+
+    const acceptedDeliveries = deliveries.filter(
+      (delivery) => delivery.status === "Accepted"
+    );
+
+    const completedDeliveries = deliveries.filter(
+      (delivery) => delivery.status === "Completed"
+    );
+
+    const earnings = completedDeliveries.reduce(
+      (total, delivery) =>
+        total + Number(delivery.payout || 0),
+      0
+    );
+
+    return res.status(200).json({
+      success: true,
+
+      count: deliveries.length,
+
+      data: deliveries,
+
+      stats: {
+        active: activeDeliveries.length,
+        accepted: acceptedDeliveries.length,
+        completed: completedDeliveries.length,
+        earnings,
+      },
+    });
+  } catch (error) {
+    console.error("Rider deliveries error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+/* ============================================================
+   3. ACCEPT ORDER
+
+   PUT /api/riders/:id/orders/:orderId/accept
+============================================================ */
+
+router.put("/:id/orders/:orderId/accept", async (req, res) => {
+  try {
+    const { id, orderId } = req.params;
+
+    if (!isValidId(id) || !isValidId(orderId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider or order ID",
+      });
+    }
+
+    const rider = await Rider.findById(id);
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: "Rider not found",
+      });
+    }
+
+    if (rider.isAvailable === false) {
       return res.status(400).json({
         success: false,
         message: "Rider is currently offline",
       });
     }
 
-    const order = await OrderBooking.findById(req.params.orderId);
+    const order = await OrderBooking.findById(orderId);
 
     if (!order) {
       return res.status(404).json({
@@ -101,19 +297,25 @@ router.put("/:id/orders/:orderId/accept", async (req, res) => {
     order.riderId = rider._id;
     order.acceptedAt = new Date();
 
-    // Default rider earning based on delivery distance
+    /* Rider earning */
+
     if (!order.riderEarning || order.riderEarning === 0) {
-      const distance = Number(order.deliveryDistance || 0);
+      const distance = Number(
+        order.deliveryDistance || 0
+      );
 
       order.riderEarning =
         distance > 0
-          ? Math.max(60, Math.round(40 + distance * 12))
+          ? Math.max(
+              60,
+              Math.round(40 + distance * 12)
+            )
           : 60;
     }
 
     await order.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: "Order accepted successfully",
       data: order,
@@ -121,24 +323,33 @@ router.put("/:id/orders/:orderId/accept", async (req, res) => {
   } catch (error) {
     console.error("Accept order error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
 
-// ============================================================
-// START DELIVERY
-// ------------------------------------------------------------
-// Rider starts the delivery after picking up the food.
-// PUT /api/riders/:id/orders/:orderId/start
-// ============================================================
+/* ============================================================
+   4. START DELIVERY
+
+   PUT /api/riders/:id/orders/:orderId/start
+============================================================ */
+
 router.put("/:id/orders/:orderId/start", async (req, res) => {
   try {
+    const { id, orderId } = req.params;
+
+    if (!isValidId(id) || !isValidId(orderId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider or order ID",
+      });
+    }
+
     const order = await OrderBooking.findOne({
-      _id: req.params.orderId,
-      riderId: req.params.id,
+      _id: orderId,
+      riderId: id,
     });
 
     if (!order) {
@@ -153,7 +364,7 @@ router.put("/:id/orders/:orderId/start", async (req, res) => {
 
     await order.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: "Delivery started",
       data: order,
@@ -161,24 +372,33 @@ router.put("/:id/orders/:orderId/start", async (req, res) => {
   } catch (error) {
     console.error("Start delivery error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
 
-// ============================================================
-// COMPLETE DELIVERY
-// ------------------------------------------------------------
-// Rider marks the order as delivered.
-// PUT /api/riders/:id/orders/:orderId/complete
-// ============================================================
+/* ============================================================
+   5. COMPLETE DELIVERY
+
+   PUT /api/riders/:id/orders/:orderId/complete
+============================================================ */
+
 router.put("/:id/orders/:orderId/complete", async (req, res) => {
   try {
+    const { id, orderId } = req.params;
+
+    if (!isValidId(id) || !isValidId(orderId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider or order ID",
+      });
+    }
+
     const order = await OrderBooking.findOne({
-      _id: req.params.orderId,
-      riderId: req.params.id,
+      _id: orderId,
+      riderId: id,
     });
 
     if (!order) {
@@ -193,7 +413,7 @@ router.put("/:id/orders/:orderId/complete", async (req, res) => {
 
     await order.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: "Delivery completed successfully",
       data: order,
@@ -201,62 +421,31 @@ router.put("/:id/orders/:orderId/complete", async (req, res) => {
   } catch (error) {
     console.error("Complete delivery error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
 
-// --- STEP 1: Create a rider profile ------------------------------
-// POST /api/riders
-router.post("/", async (req, res) => {
-  try {
-    const rider = await Rider.create(req.body);
+/* ============================================================
+   6. RIDER DASHBOARD
 
-    res.status(201).json({
-      success: true,
-      data: rider,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
+   GET /api/riders/:id/dashboard
+============================================================ */
 
-// --- STEP 2: Get every rider ---------------------------------------
-// GET /api/riders
-router.get("/", async (req, res) => {
-  try {
-    const riders = await Rider.find().populate(
-      "userId",
-      "name email role"
-    );
-
-    res.status(200).json({
-      success: true,
-      count: riders.length,
-      data: riders,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
-// ============================================================
-// RIDER DASHBOARD API
-// ------------------------------------------------------------
-// Get dashboard statistics for one rider.
-// GET /api/riders/:id/dashboard
-// ============================================================
 router.get("/:id/dashboard", async (req, res) => {
   try {
-    const rider = await Rider.findById(req.params.id).populate(
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider ID",
+      });
+    }
+
+    const rider = await Rider.findById(id).populate(
       "userId",
       "name email role"
     );
@@ -268,18 +457,12 @@ router.get("/:id/dashboard", async (req, res) => {
       });
     }
 
-    // ----------------------------------------------------------
-    // TODAY'S DATE RANGE
-    // ----------------------------------------------------------
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
 
     const endOfDay = new Date();
     endOfDay.setHours(23, 59, 59, 999);
 
-    // ----------------------------------------------------------
-    // TODAY'S ORDERS
-    // ----------------------------------------------------------
     const todayOrders = await OrderBooking.find({
       riderId: rider._id,
       createdAt: {
@@ -287,101 +470,124 @@ router.get("/:id/dashboard", async (req, res) => {
         $lte: endOfDay,
       },
     })
-      .populate("customerId", "name email")
-      .populate("restaurantId", "restaurantName name")
+      .populate("customerId", "name email phone")
+      .populate("restaurantId", "restaurantName name address")
       .sort({ createdAt: -1 });
 
-    // ----------------------------------------------------------
-    // COMPLETED DELIVERIES TODAY
-    // ----------------------------------------------------------
+    /* Completed */
+
     const completedToday = todayOrders.filter(
       (order) => order.status === "delivered"
     );
 
-    // ----------------------------------------------------------
-    // ACTIVE DELIVERY
-    // ----------------------------------------------------------
-    const activeOrder = todayOrders.find((order) =>
-      ["confirmed", "preparing", "out_for_delivery"].includes(
-        order.status
-      )
+    /* Active */
+
+    const activeOrder = todayOrders.find(
+      (order) =>
+        [
+          "confirmed",
+          "preparing",
+          "out_for_delivery",
+        ].includes(order.status)
     );
 
-    // ----------------------------------------------------------
-    // SUCCESS RATE
-    // ----------------------------------------------------------
-    const finishedOrders = todayOrders.filter((order) =>
-      ["delivered", "cancelled"].includes(order.status)
+    /* Success rate */
+
+    const finishedOrders = todayOrders.filter(
+      (order) =>
+        ["delivered", "cancelled"].includes(
+          order.status
+        )
     );
 
     const successRate =
       finishedOrders.length > 0
         ? Math.round(
-            (completedToday.length / finishedOrders.length) * 100
+            (completedToday.length /
+              finishedOrders.length) *
+              100
           )
         : 0;
 
-    // ----------------------------------------------------------
-    // TODAY'S EARNINGS
-    // ----------------------------------------------------------
-    const todayEarnings = completedToday.reduce(
-      (total, order) =>
-        total + Number(order.riderEarning || 0),
-      0
-    );
+    /* Earnings */
 
-    // ----------------------------------------------------------
-    // DISTANCE
-    // ----------------------------------------------------------
-    const totalDistance = completedToday.reduce(
-      (total, order) =>
-        total + Number(order.deliveryDistance || 0),
-      0
-    );
+    const todayEarnings =
+      completedToday.reduce(
+        (total, order) =>
+          total +
+          Number(order.riderEarning || 0),
+        0
+      );
 
-    // ----------------------------------------------------------
-    // AVERAGE DELIVERY TIME
-    // ----------------------------------------------------------
-    const completedWithTime = completedToday.filter(
-      (order) => order.acceptedAt && order.deliveredAt
-    );
+    /* Distance */
+
+    const totalDistance =
+      completedToday.reduce(
+        (total, order) =>
+          total +
+          Number(
+            order.deliveryDistance || 0
+          ),
+        0
+      );
+
+    /* Average time */
+
+    const completedWithTime =
+      completedToday.filter(
+        (order) =>
+          order.acceptedAt &&
+          order.deliveredAt
+      );
 
     let averageTime = null;
 
     if (completedWithTime.length > 0) {
-      const totalMinutes = completedWithTime.reduce(
-        (total, order) => {
-          const start = new Date(order.acceptedAt).getTime();
-          const end = new Date(order.deliveredAt).getTime();
+      const totalMinutes =
+        completedWithTime.reduce(
+          (total, order) => {
+            const start =
+              new Date(
+                order.acceptedAt
+              ).getTime();
 
-          return total + (end - start) / (1000 * 60);
-        },
-        0
-      );
+            const end =
+              new Date(
+                order.deliveredAt
+              ).getTime();
+
+            return (
+              total +
+              (end - start) /
+                (1000 * 60)
+            );
+          },
+          0
+        );
 
       averageTime = Math.round(
-        totalMinutes / completedWithTime.length
+        totalMinutes /
+          completedWithTime.length
       );
     }
 
-    // ----------------------------------------------------------
-    // RECENT ACTIVITY
-    // ----------------------------------------------------------
-    const recentActivity = todayOrders
-      .slice(0, 5)
-      .map((order) => ({
-        id: order._id,
-        status: order.status,
-        orderId: order._id,
-        createdAt: order.createdAt,
-        totalAmount: order.totalAmount,
-        riderEarning: order.riderEarning || 0,
-      }));
+    /* Recent activity */
 
-    // ----------------------------------------------------------
-    // RESPONSE
-    // ----------------------------------------------------------
-    res.status(200).json({
+    const recentActivity =
+      todayOrders
+        .slice(0, 5)
+        .map((order) => ({
+          id: order._id,
+          status: order.status,
+          orderId: order._id,
+          createdAt: order.createdAt,
+          totalAmount:
+            order.totalAmount || 0,
+          riderEarning:
+            order.riderEarning || 0,
+        }));
+
+    return res.status(200).json({
       success: true,
 
       data: {
@@ -390,66 +596,99 @@ router.get("/:id/dashboard", async (req, res) => {
           name: rider.name,
           email: rider.email,
           phone: rider.phone,
-          vehicleType: rider.vehicleType,
-          vehicleNumber: rider.vehicleNumber,
-          isAvailable: rider.isAvailable,
+          vehicleType:
+            rider.vehicleType,
+          vehicleNumber:
+            rider.vehicleNumber,
+          isAvailable:
+            rider.isAvailable,
           status: rider.status,
-          rating: rider.rating || 4.9,
+          rating:
+            rider.rating || 4.9,
         },
 
         stats: {
-          todayDeliveries: completedToday.length,
+          todayDeliveries:
+            completedToday.length,
+
           todayEarnings,
-          activeDelivery: activeOrder ? 1 : 0,
-          deliverySuccess: successRate,
+
+          activeDelivery:
+            activeOrder ? 1 : 0,
+
+          deliverySuccess:
+            successRate,
         },
 
-        activeDelivery: activeOrder || null,
+        activeDelivery:
+          activeOrder || null,
 
         performance: {
-          completed: completedToday.length,
+          completed:
+            completedToday.length,
+
           averageTime,
-          distance: Number(totalDistance.toFixed(1)),
-          rating: rider.rating || 4.9,
+
+          distance:
+            Number(
+              totalDistance.toFixed(1)
+            ),
+
+          rating:
+            rider.rating || 4.9,
         },
 
         recentActivity,
       },
     });
   } catch (error) {
-    console.error("Rider dashboard error:", error);
+    console.error(
+      "Rider dashboard error:",
+      error
+    );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
 
-// ============================================================
-// UPDATE RIDER ONLINE / OFFLINE STATUS
-// ------------------------------------------------------------
-// PATCH /api/riders/:id/availability
-// ============================================================
+/* ============================================================
+   7. UPDATE AVAILABILITY
+
+   PATCH /api/riders/:id/availability
+============================================================ */
+
 router.patch("/:id/availability", async (req, res) => {
   try {
+    const { id } = req.params;
     const { isAvailable } = req.body;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider ID",
+      });
+    }
 
     if (typeof isAvailable !== "boolean") {
       return res.status(400).json({
         success: false,
-        message: "isAvailable must be true or false",
+        message:
+          "isAvailable must be true or false",
       });
     }
 
-    const rider = await Rider.findByIdAndUpdate(
-      req.params.id,
-      { isAvailable },
-      {
-        new: true,
-        runValidators: true,
-      }
-    );
+    const rider =
+      await Rider.findByIdAndUpdate(
+        id,
+        { isAvailable },
+        {
+          new: true,
+          runValidators: true,
+        }
+      );
 
     if (!rider) {
       return res.status(404).json({
@@ -458,33 +697,114 @@ router.patch("/:id/availability", async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
+
       message: isAvailable
         ? "Rider is now online"
         : "Rider is now offline",
+
       data: {
-        isAvailable: rider.isAvailable,
+        isAvailable:
+          rider.isAvailable,
       },
     });
   } catch (error) {
-    console.error("Availability update error:", error);
+    console.error(
+      "Availability error:",
+      error
+    );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
 
-// --- STEP 3: Get a single rider by id -------------------------------
-// GET /api/riders/:id
+/* ============================================================
+   8. CREATE RIDER
+
+   POST /api/riders
+============================================================ */
+
+router.post("/", async (req, res) => {
+  try {
+    const rider = await Rider.create(
+      req.body
+    );
+
+    return res.status(201).json({
+      success: true,
+      data: rider,
+    });
+  } catch (error) {
+    console.error(
+      "Create rider error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+/* ============================================================
+   9. GET ALL RIDERS
+
+   GET /api/riders
+============================================================ */
+
+router.get("/", async (req, res) => {
+  try {
+    const riders = await Rider.find()
+      .populate(
+        "userId",
+        "name email role"
+      );
+
+    return res.status(200).json({
+      success: true,
+      count: riders.length,
+      data: riders,
+    });
+  } catch (error) {
+    console.error(
+      "Get riders error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+/* ============================================================
+   10. GET SINGLE RIDER
+
+   GET /api/riders/:id
+============================================================ */
+
 router.get("/:id", async (req, res) => {
   try {
-    const rider = await Rider.findById(req.params.id).populate(
-      "userId",
-      "name email role"
-    );
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider ID",
+      });
+    }
+
+    const rider =
+      await Rider.findById(id).populate(
+        "userId",
+        "name email role"
+      );
 
     if (!rider) {
       return res.status(404).json({
@@ -493,55 +813,93 @@ router.get("/:id", async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       data: rider,
     });
   } catch (error) {
-    res.status(500).json({
+    console.error(
+      "Get rider error:",
+      error
+    );
+
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
 
-// --- STEP 4: Update a rider profile -----------------------------------
-// PUT /api/riders/:id
+/* ============================================================
+   11. UPDATE RIDER
+
+   PUT /api/riders/:id
+============================================================ */
+
 router.put("/:id", async (req, res) => {
   try {
-    const rider = await Rider.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      {
-        new: true,
-        runValidators: true,
-      }
-    );
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider ID",
+      });
+    }
+
+    const rider =
+      await Rider.findByIdAndUpdate(
+        id,
+        req.body,
+        {
+          new: true,
+          runValidators: true,
+        }
+      );
 
     if (!rider) {
-      return res.status(404).json({
+      return res.status(404).json( {
         success: false,
         message: "Rider not found",
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       data: rider,
     });
   } catch (error) {
-    res.status(500).json({
+    console.error(
+      "Update rider error:",
+      error
+    );
+
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
 
-// --- STEP 5: Delete a rider profile --------------------------------------
-// DELETE /api/riders/:id
+/* ============================================================
+   12. DELETE RIDER
+
+   DELETE /api/riders/:id
+============================================================ */
+
 router.delete("/:id", async (req, res) => {
   try {
-    const rider = await Rider.findByIdAndDelete(req.params.id);
+    const { id } = req.params;
+
+    if (!isValidId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid rider ID",
+      });
+    }
+
+    const rider =
+      await Rider.findByIdAndDelete(id);
 
     if (!rider) {
       return res.status(404).json({
@@ -550,12 +908,17 @@ router.delete("/:id", async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: "Rider deleted",
+      message: "Rider deleted successfully",
     });
   } catch (error) {
-    res.status(500).json({
+    console.error(
+      "Delete rider error:",
+      error
+    );
+
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
