@@ -20,7 +20,40 @@ const orderBookingSchema = new mongoose.Schema(
   {
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     restaurantId: { type: mongoose.Schema.Types.ObjectId, ref: "Restaurant", required: true },
+
     riderId: { type: mongoose.Schema.Types.ObjectId, ref: "Rider" }, // assigned after booking
+
+    // ============================================================
+    // RIDER DELIVERY DATA
+    // ------------------------------------------------------------
+    // These fields are only used by the rider/delivery side.
+    // They are optional, so existing orders will continue working.
+    // ============================================================
+    riderEarning: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
+    deliveryDistance: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
+    acceptedAt: {
+      type: Date,
+    },
+
+    pickedUpAt: {
+      type: Date,
+    },
+
+    deliveredAt: {
+      type: Date,
+    },
+
+
     items: {
       type: [orderItemSchema],
       required: true,
