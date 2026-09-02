@@ -11,14 +11,218 @@ const OrderBooking = require("../models/OrderBooking");
 // ============================================================
 const router = express.Router();
 
+// ============================================================
+// RIDER AVAILABLE ORDERS
+// ------------------------------------------------------------
+// Get orders that are ready to be accepted by a rider.
+// GET /api/riders/:id/orders/available
+// ============================================================
+router.get("/:id/orders/available", async (req, res) => {
+  try {
+    const rider = await Rider.findById(req.params.id);
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: "Rider not found",
+      });
+    }
+
+    const orders = await OrderBooking.find({
+      riderId: null,
+      status: { $in: ["confirmed", "preparing"] },
+    })
+      .populate("customerId", "name email")
+      .populate("restaurantId", "restaurantName name")
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: orders.length,
+      data: orders,
+    });
+  } catch (error) {
+    console.error("Available orders error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// ============================================================
+// ACCEPT ORDER
+// ------------------------------------------------------------
+// Rider accepts an available delivery order.
+// PUT /api/riders/:id/orders/:orderId/accept
+// ============================================================
+router.put("/:id/orders/:orderId/accept", async (req, res) => {
+  try {
+    const rider = await Rider.findById(req.params.id);
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: "Rider not found",
+      });
+    }
+
+    if (!rider.isAvailable) {
+      return res.status(400).json({
+        success: false,
+        message: "Rider is currently offline",
+      });
+    }
+
+    const order = await OrderBooking.findById(req.params.orderId);
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    if (order.riderId) {
+      return res.status(400).json({
+        success: false,
+        message: "This order has already been assigned",
+      });
+    }
+
+    if (!["confirmed", "preparing"].includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        message: "This order is not available for delivery",
+      });
+    }
+
+    order.riderId = rider._id;
+    order.acceptedAt = new Date();
+
+    // Default rider earning based on delivery distance
+    if (!order.riderEarning || order.riderEarning === 0) {
+      const distance = Number(order.deliveryDistance || 0);
+
+      order.riderEarning =
+        distance > 0
+          ? Math.max(60, Math.round(40 + distance * 12))
+          : 60;
+    }
+
+    await order.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Order accepted successfully",
+      data: order,
+    });
+  } catch (error) {
+    console.error("Accept order error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// ============================================================
+// START DELIVERY
+// ------------------------------------------------------------
+// Rider starts the delivery after picking up the food.
+// PUT /api/riders/:id/orders/:orderId/start
+// ============================================================
+router.put("/:id/orders/:orderId/start", async (req, res) => {
+  try {
+    const order = await OrderBooking.findOne({
+      _id: req.params.orderId,
+      riderId: req.params.id,
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Assigned order not found",
+      });
+    }
+
+    order.status = "out_for_delivery";
+    order.pickedUpAt = new Date();
+
+    await order.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Delivery started",
+      data: order,
+    });
+  } catch (error) {
+    console.error("Start delivery error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// ============================================================
+// COMPLETE DELIVERY
+// ------------------------------------------------------------
+// Rider marks the order as delivered.
+// PUT /api/riders/:id/orders/:orderId/complete
+// ============================================================
+router.put("/:id/orders/:orderId/complete", async (req, res) => {
+  try {
+    const order = await OrderBooking.findOne({
+      _id: req.params.orderId,
+      riderId: req.params.id,
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Assigned order not found",
+      });
+    }
+
+    order.status = "delivered";
+    order.deliveredAt = new Date();
+
+    await order.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Delivery completed successfully",
+      data: order,
+    });
+  } catch (error) {
+    console.error("Complete delivery error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
 // --- STEP 1: Create a rider profile ------------------------------
 // POST /api/riders
 router.post("/", async (req, res) => {
   try {
     const rider = await Rider.create(req.body);
-    res.status(201).json({ success: true, data: rider });
+
+    res.status(201).json({
+      success: true,
+      data: rider,
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
@@ -26,7 +230,10 @@ router.post("/", async (req, res) => {
 // GET /api/riders
 router.get("/", async (req, res) => {
   try {
-    const riders = await Rider.find().populate("userId", "name email role");
+    const riders = await Rider.find().populate(
+      "userId",
+      "name email role"
+    );
 
     res.status(200).json({
       success: true,
@@ -81,7 +288,7 @@ router.get("/:id/dashboard", async (req, res) => {
       },
     })
       .populate("customerId", "name email")
-      .populate("restaurantId", "name")
+      .populate("restaurantId", "restaurantName name")
       .sort({ createdAt: -1 });
 
     // ----------------------------------------------------------
@@ -118,7 +325,8 @@ router.get("/:id/dashboard", async (req, res) => {
     // TODAY'S EARNINGS
     // ----------------------------------------------------------
     const todayEarnings = completedToday.reduce(
-      (total, order) => total + Number(order.riderEarning || 0),
+      (total, order) =>
+        total + Number(order.riderEarning || 0),
       0
     );
 
@@ -159,14 +367,16 @@ router.get("/:id/dashboard", async (req, res) => {
     // ----------------------------------------------------------
     // RECENT ACTIVITY
     // ----------------------------------------------------------
-    const recentActivity = todayOrders.slice(0, 5).map((order) => ({
-      id: order._id,
-      status: order.status,
-      orderId: order._id,
-      createdAt: order.createdAt,
-      totalAmount: order.totalAmount,
-      riderEarning: order.riderEarning || 0,
-    }));
+    const recentActivity = todayOrders
+      .slice(0, 5)
+      .map((order) => ({
+        id: order._id,
+        status: order.status,
+        orderId: order._id,
+        createdAt: order.createdAt,
+        totalAmount: order.totalAmount,
+        riderEarning: order.riderEarning || 0,
+      }));
 
     // ----------------------------------------------------------
     // RESPONSE
@@ -184,7 +394,7 @@ router.get("/:id/dashboard", async (req, res) => {
           vehicleNumber: rider.vehicleNumber,
           isAvailable: rider.isAvailable,
           status: rider.status,
-          rating: rider.rating || 0,
+          rating: rider.rating || 4.9,
         },
 
         stats: {
@@ -200,7 +410,7 @@ router.get("/:id/dashboard", async (req, res) => {
           completed: completedToday.length,
           averageTime,
           distance: Number(totalDistance.toFixed(1)),
-          rating: rider.rating || 0,
+          rating: rider.rating || 4.9,
         },
 
         recentActivity,
