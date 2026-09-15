@@ -82,8 +82,9 @@ router.delete("/:id", protect, async (req, res) => {
       return res.status(403).json({ success: false, message: "Not authorized to modify this item" });
     }
 
-    await MenuItem.findByIdAndDelete(req.params.id);
-    res.status(200).json({ success: true, message: "Menu item deleted" });
+    menuItem.isActive = false;
+    await menuItem.save();
+    res.status(200).json({ success: true, message: "Menu item soft deleted" });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
