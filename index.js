@@ -1,10 +1,8 @@
 require("dotenv").config();
 
-const http = require("http");
 const express = require("express");
 const cors = require("cors");
 const connectDB = require("./config/db");
-const attachChatSocket = require("./socket/chatSocket");
 
 const userRoutes = require("./routes/userRoutes");
 const adminRoutes = require("./routes/adminRoutes");
@@ -39,7 +37,7 @@ app.use("/api/riders", riderRoutes); // rider collection
 app.use("/api/orders", orderBookingRoutes); // orderBooking collection
 app.use("/api/menu", menuRoutes); // menu collection
 app.use("/api/categories", categoryRoutes); // category collection
-app.use("/api/chat", chatRoutes); // chat history (live sending happens over Socket.IO)
+app.use("/api/chat", chatRoutes); // chat messages (read and send over HTTP, frontend polls for new ones)
 
 // Catch-all for unknown routes.
 app.use((req, res) => {
@@ -53,17 +51,10 @@ connectDB().catch((error) => {
 // Only bind a port for local/nodemon dev. On Vercel this file is required
 // as a serverless function module, so it must export `app` instead of
 // listening on a port itself.
-//
-// Chat needs a long-running process: Express is given to an explicit HTTP
-// server here only so Socket.IO can attach to that same server. Handling of
-// every existing HTTP route is unchanged.
 if (require.main === module) {
   const PORT = process.env.PORT || 8000;
-  const server = http.createServer(app);
-  attachChatSocket(server);
-  server.listen(PORT, () => {
+  app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
-    console.log("Socket.IO chat is listening on the same port");
   });
 }
 

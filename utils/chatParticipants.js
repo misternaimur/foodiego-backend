@@ -4,7 +4,7 @@ const Restaurant = require("../models/Restaurant");
 const Rider = require("../models/Rider");
 
 // ============================================================
-// CHAT PARTICIPANT CHECK (shared by the REST route and sockets)
+// CHAT PARTICIPANT CHECK (shared by every chat route)
 // ------------------------------------------------------------
 // A chat only exists inside an order. Before anyone may read or
 // send messages, we check that the logged-in user really is one of
@@ -21,14 +21,9 @@ const Rider = require("../models/Rider");
 
 const CHAT_CHANNELS = ["customer_rider", "restaurant_rider"];
 
-// Room name used by Socket.IO, e.g. "order_667f..._customer_rider".
-function getChatRoomName(orderId, channel) {
-  return `order_${orderId}_${channel}`;
-}
-
 // Returns either { ok: true, order, senderRole } or
 // { ok: false, status, message } - plain object, no exceptions,
-// so both the REST route and the socket handlers can use it.
+// so any chat route can use it the same way.
 async function getChatParticipant(orderId, channel, userId) {
   if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
     return { ok: false, status: 400, message: "Invalid orderId" };
@@ -71,4 +66,4 @@ async function getChatParticipant(orderId, channel, userId) {
   return { ok: false, status: 403, message: "You are not a participant in this chat" };
 }
 
-module.exports = { CHAT_CHANNELS, getChatRoomName, getChatParticipant };
+module.exports = { getChatParticipant };

@@ -1,12 +1,17 @@
 // ============================================================
-// END-TO-END TEST FOR THE CHAT FEATURE
+// END-TO-END TEST FOR THE CHAT FEATURE (HTTP / polling)
 // ------------------------------------------------------------
 // Starts a throwaway in-memory MongoDB, seeds a customer, a rider,
 // a restaurant owner, an outsider and two orders (one with a rider
 // assigned, one without), then boots the real server (index.js) as
-// a child process and exercises it over real HTTP and real sockets.
+// a child process and exercises it over real HTTP requests.
 //
-// Run with:  node tests/chat.e2e.test.js
+// The frontend flow being tested here is:
+//   1. GET  /api/chat/:orderId/:channel              -> load the thread
+//   2. POST /api/chat/:orderId/:channel              -> send a message
+//   3. GET  /api/chat/:orderId/:channel?since=<date> -> poll for new ones
+//
+// Run with:  npm run test:chat
 // ============================================================
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
@@ -14,7 +19,6 @@ const path = require("node:path");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const { MongoMemoryServer } = require("mongodb-memory-server");
-const { io } = require("socket.io-client");
 
 const JWT_SECRET = "test-secret-for-chat-e2e";
 const PORT = 8991;
@@ -25,9 +29,12 @@ const User = require("../models/User");
 const Rider = require("../models/Rider");
 const Restaurant = require("../models/Restaurant");
 const OrderBooking = require("../models/OrderBooking");
+const ChatMessage = require("../models/ChatMessage");
 
 let passed = 0;
 const failures = [];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function check(name, fn) {
   try {
@@ -40,58 +47,23 @@ async function check(name, fn) {
   }
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Small HTTP helper so the checks stay readable.
+async function request(method, pathname, { token, body } = {}) {
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
 
-function api(pathname, token) {
-  return fetch(`${BASE_URL}${pathname}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  const res = await fetch(`${BASE_URL}${pathname}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
+
+  return { status: res.status, body: await res.json() };
 }
 
-function connectSocket(token) {
-  return new Promise((resolve, reject) => {
-    const socket = io(BASE_URL, {
-      auth: { token },
-      transports: ["websocket"],
-      reconnection: false,
-    });
-    const timer = setTimeout(() => reject(new Error("socket connect timed out")), 5000);
-    socket.on("connect", () => {
-      clearTimeout(timer);
-      resolve(socket);
-    });
-    socket.on("connect_error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
-}
-
-// Resolves with the next payload of `event`, or rejects after `ms`.
-function nextEvent(socket, event, ms = 3000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timed out waiting for "${event}"`)), ms);
-    socket.once(event, (payload) => {
-      clearTimeout(timer);
-      resolve(payload);
-    });
-  });
-}
-
-// Waits `ms` and returns true if `event` fired in that window.
-function expectSilence(socket, event, ms = 600) {
-  return new Promise((resolve) => {
-    const onEvent = () => {
-      clearTimeout(timer);
-      resolve(false);
-    };
-    const timer = setTimeout(() => {
-      socket.off(event, onEvent);
-      resolve(true);
-    }, ms);
-    socket.once(event, onEvent);
-  });
-}
+const get = (pathname, token) => request("GET", pathname, { token });
+const post = (pathname, token, body) => request("POST", pathname, { token, body });
 
 async function waitForServer() {
   for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -180,28 +152,32 @@ async function main() {
     outsider: tokenFor(outsider),
   };
 
+  const orderId = order._id.toString();
+  const noRiderOrderId = orderNoRider._id.toString();
+  const customerRider = `/api/chat/${orderId}/customer_rider`;
+  const restaurantRider = `/api/chat/${orderId}/restaurant_rider`;
+
   await mongoose.disconnect();
 
   // ---------- boot the real server ----------
   console.log("Starting server (index.js)...");
   const server = spawn(process.execPath, [path.join(__dirname, "..", "index.js")], {
-    env: {
-      ...process.env,
-      MONGODB_URL: uri,
-      JWT_SECRET,
-      PORT: String(PORT),
-    },
+    env: { ...process.env, MONGODB_URL: uri, JWT_SECRET, PORT: String(PORT) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   server.stdout.on("data", (d) => process.stdout.write(`    [server] ${d}`));
   server.stderr.on("data", (d) => process.stderr.write(`    [server:err] ${d}`));
   await waitForServer();
 
-  const orderId = order._id.toString();
-
   try {
     // ================= EXISTING BEHAVIOUR IS UNCHANGED =================
-    console.log("\n[1] Existing HTTP behaviour after the index.js change");
+    console.log("\n[1] Existing HTTP behaviour is unchanged");
+    const rootRes = await fetch(`${BASE_URL}/`);
+    await check("GET / still serves the plain status string", async () => {
+      assert.equal(rootRes.status, 200);
+      assert.equal(await rootRes.text(), "FoodEgo backend API is running");
+    });
+
     const loginRes = await fetch(`${BASE_URL}/api/users/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -209,330 +185,340 @@ async function main() {
     });
     const loginBody = await loginRes.json();
     tokens.customerFromLogin = loginBody.token;
-
-    const rootRes = await fetch(`${BASE_URL}/`);
-    await check("GET / still serves the plain status string", async () => {
-      assert.equal(rootRes.status, 200);
-    });
-    await check("GET / body unchanged", async () => {
-      assert.equal(await rootRes.text(), "FoodEgo backend API is running");
-    });
-    await check("GET /api/orders still returns { success, count, data }", async () => {
-      const res = await api("/api/orders");
-      const body = await res.json();
-      assert.equal(res.status, 200);
-      assert.equal(body.success, true);
-      assert.equal(body.count, 2);
-      assert.ok(Array.isArray(body.data));
-    });
-    await check("GET /api/users still works", async () => {
-      const body = await (await api("/api/users")).json();
-      assert.equal(body.success, true);
-      assert.equal(body.count, 4);
-    });
-    await check("GET /api/restaurants still works", async () => {
-      const body = await (await api("/api/restaurants")).json();
-      assert.equal(body.success, true);
-      assert.equal(body.count, 1);
-    });
-    await check("GET /api/riders still works", async () => {
-      const body = await (await api("/api/riders")).json();
-      assert.equal(body.success, true);
-      assert.equal(body.count, 1);
-    });
-    await check("unknown route still returns the 404 JSON", async () => {
-      const res = await api("/api/does-not-exist");
-      assert.equal(res.status, 404);
-      assert.deepEqual(await res.json(), { success: false, message: "Route not found" });
-    });
     await check("POST /api/users/login still issues a token", () => {
       assert.ok(loginBody.token);
       assert.equal(loginBody.data.role, "customer");
     });
 
-    // ================= SOCKET HANDSHAKE AUTH =================
-    console.log("\n[2] Socket.IO handshake authentication");
-    let rejectedNoToken = false;
-    try {
-      await connectSocket(undefined);
-    } catch (error) {
-      rejectedNoToken = true;
-    }
-    await check("connection without a token is rejected", () => assert.equal(rejectedNoToken, true));
-
-    let rejectedBadToken = false;
-    try {
-      await connectSocket("not-a-real-token");
-    } catch (error) {
-      rejectedBadToken = true;
-    }
-    await check("connection with an invalid token is rejected", () =>
-      assert.equal(rejectedBadToken, true)
-    );
-
-    const customerSocket = await connectSocket(tokens.customer);
-    await check("connection with a valid token succeeds", () =>
-      assert.equal(customerSocket.connected, true)
-    );
-    await check("a token from POST /api/users/login also works over sockets", async () => {
-      const s = await connectSocket(tokens.customerFromLogin);
-      assert.equal(s.connected, true);
-      s.disconnect();
+    await check("GET /api/orders still returns { success, count, data }", async () => {
+      const res = await get("/api/orders");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.success, true);
+      assert.equal(res.body.count, 2);
+      assert.ok(Array.isArray(res.body.data));
+    });
+    await check("GET /api/users still works", async () => {
+      const res = await get("/api/users");
+      assert.equal(res.body.success, true);
+      assert.equal(res.body.count, 4);
+    });
+    await check("GET /api/restaurants still works", async () => {
+      const res = await get("/api/restaurants");
+      assert.equal(res.body.success, true);
+      assert.equal(res.body.count, 1);
+    });
+    await check("GET /api/riders still works", async () => {
+      const res = await get("/api/riders");
+      assert.equal(res.body.success, true);
+      assert.equal(res.body.count, 1);
+    });
+    await check("unknown route still returns the 404 JSON", async () => {
+      const res = await get("/api/does-not-exist");
+      assert.equal(res.status, 404);
+      assert.deepEqual(res.body, { success: false, message: "Route not found" });
     });
 
-    const riderSocket = await connectSocket(tokens.rider);
-    const restaurantSocket = await connectSocket(tokens.restaurant);
-    const outsiderSocket = await connectSocket(tokens.outsider);
+    // ================= SENDING =================
+    console.log("\n[2] Sending messages (POST)");
+    const emptyRes = await get(customerRider, tokens.customer);
+    await check("a brand new thread starts empty", () => {
+      assert.equal(emptyRes.status, 200);
+      assert.equal(emptyRes.body.count, 0);
+      assert.deepEqual(emptyRes.body.data, []);
+    });
 
-    // ================= CUSTOMER <-> RIDER =================
-    console.log("\n[3] customer_rider channel");
-    customerSocket.emit("join_chat", { orderId, channel: "customer_rider" });
-    riderSocket.emit("join_chat", { orderId, channel: "customer_rider" });
-    await sleep(400);
-
-    const riderReceives = nextEvent(riderSocket, "receive_message");
-    customerSocket.emit("send_message", {
-      orderId,
-      channel: "customer_rider",
+    const customerSend = await post(customerRider, tokens.customer, {
       message: "I am outside the building",
     });
-    const msg1 = await riderReceives;
-    await check("rider receives the customer's message", () =>
-      assert.equal(msg1.message, "I am outside the building")
-    );
-    await check("broadcast carries orderId, channel, senderRole and createdAt", () => {
-      assert.equal(msg1.orderId, orderId);
-      assert.equal(msg1.channel, "customer_rider");
-      assert.equal(msg1.senderRole, "customer");
-      assert.equal(msg1.senderId, customer._id.toString());
-      assert.ok(msg1.createdAt);
+    await check("customer can send into customer_rider", () => {
+      assert.equal(customerSend.status, 201);
+      assert.equal(customerSend.body.success, true);
+    });
+    await check("the created message carries the right sender and role", () => {
+      assert.equal(customerSend.body.data.senderRole, "customer");
+      assert.equal(customerSend.body.data.senderId, customer._id.toString());
+      assert.equal(customerSend.body.data.message, "I am outside the building");
+      assert.equal(customerSend.body.data.channel, "customer_rider");
+      assert.equal(customerSend.body.data.orderId, orderId);
+      assert.ok(customerSend.body.data.createdAt);
     });
 
-    await sleep(30);
-    const customerReceives = nextEvent(customerSocket, "receive_message");
-    const riderReceivesOwn = nextEvent(riderSocket, "receive_message");
-    riderSocket.emit("send_message", {
-      orderId,
-      channel: "customer_rider",
-      message: "On my way",
+    await check("a token from POST /api/users/login can send too", async () => {
+      const res = await post(customerRider, tokens.customerFromLogin, {
+        message: "sent with a freshly logged-in token",
+      });
+      assert.equal(res.status, 201);
     });
-    const msg2 = await customerReceives;
-    await riderReceivesOwn;
-    await check("customer receives the rider's reply", () => assert.equal(msg2.message, "On my way"));
-    await check("rider is recognised inside the customer channel", () =>
-      assert.equal(msg2.senderRole, "rider")
-    );
-    await check("sender also receives the broadcast", () => assert.equal(msg2.senderRole, "rider"));
 
-    // ================= RESTAURANT <-> RIDER =================
-    console.log("\n[4] restaurant_rider channel");
-    restaurantSocket.emit("join_chat", { orderId, channel: "restaurant_rider" });
-    riderSocket.emit("join_chat", { orderId, channel: "restaurant_rider" });
-    await sleep(400);
+    await sleep(20);
+    const riderSend = await post(customerRider, tokens.rider, { message: "On my way" });
+    await check("rider can reply in customer_rider", () => {
+      assert.equal(riderSend.status, 201);
+      assert.equal(riderSend.body.data.senderRole, "rider");
+    });
 
-    await sleep(30);
-    const riderGetsRestaurantMsg = nextEvent(riderSocket, "receive_message");
-    restaurantSocket.emit("send_message", {
-      orderId,
-      channel: "restaurant_rider",
+    await sleep(20);
+    const restaurantSend = await post(restaurantRider, tokens.restaurant, {
       message: "Order is packed and ready",
     });
-    const msg3 = await riderGetsRestaurantMsg;
-    await check("rider receives the restaurant's message", () =>
-      assert.equal(msg3.message, "Order is packed and ready")
-    );
-    await check("restaurant role is recorded correctly", () =>
-      assert.equal(msg3.senderRole, "restaurant")
-    );
-    await check("restaurant's senderId is its login account", () =>
-      assert.equal(msg3.senderId, restaurantUser._id.toString())
+    await check("restaurant can send into restaurant_rider", () => {
+      assert.equal(restaurantSend.status, 201);
+      assert.equal(restaurantSend.body.data.senderRole, "restaurant");
+    });
+    await check("restaurant messages record the login account as sender", () =>
+      assert.equal(restaurantSend.body.data.senderId, restaurantUser._id.toString())
     );
 
-    // ================= CHANNEL ISOLATION =================
-    console.log("\n[5] The two channels stay separate");
-    // riderSocket is in both rooms; customer is only in customer_rider and
-    // restaurant is only in restaurant_rider, so a customer_rider message
-    // must not reach the restaurant. The copies the in-room sockets receive
-    // are drained here so they cannot confuse the later checks.
-    const noLeakToRestaurant = expectSilence(restaurantSocket, "receive_message", 800);
-    const customerOwnCopy = nextEvent(customerSocket, "receive_message");
-    const riderOwnCopy = nextEvent(riderSocket, "receive_message");
-    customerSocket.emit("send_message", {
-      orderId,
-      channel: "customer_rider",
-      message: "Just for the rider",
+    await sleep(20);
+    const riderRestaurantSend = await post(restaurantRider, tokens.rider, {
+      message: "Picking it up now",
     });
-    await check("a customer_rider message does not reach the restaurant thread", async () => {
-      assert.equal(await noLeakToRestaurant, true);
-    });
-    await customerOwnCopy;
-    await riderOwnCopy;
-
-    const noLeakToCustomer = expectSilence(customerSocket, "receive_message", 800);
-    const restaurantOwnCopy = nextEvent(restaurantSocket, "receive_message");
-    const riderOwnCopy2 = nextEvent(riderSocket, "receive_message");
-    restaurantSocket.emit("send_message", {
-      orderId,
-      channel: "restaurant_rider",
-      message: "Just for the rider from the kitchen",
-    });
-    await check("a restaurant_rider message does not reach the customer thread", async () => {
-      assert.equal(await noLeakToCustomer, true);
-    });
-    await restaurantOwnCopy;
-    await riderOwnCopy2;
-
-    // ================= NON-PARTICIPANTS ARE BLOCKED =================
-    console.log("\n[6] Non-participants are rejected");
-    const outsiderJoinError = nextEvent(outsiderSocket, "chat_error");
-    outsiderSocket.emit("join_chat", { orderId, channel: "customer_rider" });
-    const joinErr = await outsiderJoinError;
-    await check("outsider cannot join over the socket", () =>
-      assert.equal(joinErr.message, "You are not a participant in this chat")
+    await check("rider can reply in restaurant_rider", () =>
+      assert.equal(riderRestaurantSend.body.data.senderRole, "rider")
     );
 
-    const outsiderSendError = nextEvent(outsiderSocket, "chat_error");
-    outsiderSocket.emit("send_message", {
-      orderId,
-      channel: "customer_rider",
-      message: "let me in",
-    });
-    const sendErr = await outsiderSendError;
-    await check("outsider cannot send over the socket", () =>
-      assert.equal(sendErr.message, "You are not a participant in this chat")
-    );
-
-    const canOutsiderHear = expectSilence(outsiderSocket, "receive_message", 700);
-    customerSocket.emit("send_message", {
-      orderId,
-      channel: "customer_rider",
-      message: "private message",
-    });
-    await check("outsider never receives room broadcasts", async () => {
-      assert.equal(await canOutsiderHear, true);
+    await check("the sender is taken from the token, not the request body", async () => {
+      const res = await post(customerRider, tokens.customer, {
+        message: "trying to impersonate the rider",
+        senderId: riderUser._id.toString(),
+        senderRole: "rider",
+      });
+      assert.equal(res.status, 201);
+      assert.equal(res.body.data.senderRole, "customer");
+      assert.equal(res.body.data.senderId, customer._id.toString());
     });
 
-    // The customer is not part of the restaurant thread.
-    const customerWrongChannel = nextEvent(customerSocket, "chat_error");
-    customerSocket.emit("join_chat", { orderId, channel: "restaurant_rider" });
-    const wrongChannelErr = await customerWrongChannel;
-    await check("customer cannot join the restaurant_rider channel", () =>
-      assert.equal(wrongChannelErr.message, "You are not a participant in this chat")
-    );
-
-    // An order with no rider assigned has a closed customer_rider chat.
-    const noRiderErr = nextEvent(riderSocket, "chat_error");
-    riderSocket.emit("join_chat", {
-      orderId: orderNoRider._id.toString(),
-      channel: "customer_rider",
-    });
-    const noRiderBody = await noRiderErr;
-    await check("a rider not assigned to the order cannot join", () =>
-      assert.equal(noRiderBody.message, "You are not a participant in this chat")
-    );
-
-    const invalidChannelErr = nextEvent(customerSocket, "chat_error");
-    customerSocket.emit("join_chat", { orderId, channel: "customer_restaurant" });
-    await check("an unknown channel is refused", async () => {
-      assert.equal((await invalidChannelErr).message, "Invalid channel");
+    await check("surrounding whitespace is trimmed", async () => {
+      const res = await post(customerRider, tokens.customer, { message: "   padded   " });
+      assert.equal(res.body.data.message, "padded");
     });
 
-    const emptyMessageErr = nextEvent(customerSocket, "chat_error");
-    customerSocket.emit("send_message", { orderId, channel: "customer_rider", message: "   " });
-    await check("an empty message is refused", async () => {
-      assert.equal((await emptyMessageErr).message, "message is required");
-    });
-
-    const badOrderErr = nextEvent(customerSocket, "chat_error");
-    customerSocket.emit("join_chat", { orderId: "not-an-id", channel: "customer_rider" });
-    await check("a malformed orderId is refused", async () => {
-      assert.equal((await badOrderErr).message, "Invalid orderId");
-    });
-
-    const missingOrderErr = nextEvent(customerSocket, "chat_error");
-    customerSocket.emit("join_chat", {
-      orderId: new mongoose.Types.ObjectId().toString(),
-      channel: "customer_rider",
-    });
-    await check("an order that does not exist is refused", async () => {
-      assert.equal((await missingOrderErr).message, "Order not found");
-    });
-
-    // ================= REST HISTORY =================
-    console.log("\n[7] REST history endpoint");
-    const historyRes = await api(`/api/chat/${orderId}/customer_rider`, tokens.customer);
-    const history = await historyRes.json();
-    await check("customer can fetch customer_rider history", () => {
-      assert.equal(historyRes.status, 200);
-      assert.equal(history.success, true);
-    });
-    await check("history contains every message sent over the socket", () => {
-      const texts = history.data.map((m) => m.message);
-      assert.ok(texts.includes("I am outside the building"));
-      assert.ok(texts.includes("On my way"));
-      assert.ok(texts.includes("Just for the rider"));
-      assert.ok(texts.includes("private message"));
+    // ================= READING =================
+    console.log("\n[3] Reading history");
+    const history = await get(customerRider, tokens.customer);
+    await check("customer reads the customer_rider thread", () => {
+      assert.equal(history.status, 200);
+      assert.equal(history.body.success, true);
+      assert.ok(history.body.count >= 5);
     });
     await check("history is oldest first", () => {
-      const times = history.data.map((m) => new Date(m.createdAt).getTime());
-      const sorted = [...times].sort((a, b) => a - b);
-      assert.deepEqual(times, sorted);
+      const times = history.body.data.map((m) => new Date(m.createdAt).getTime());
+      assert.deepEqual(times, [...times].sort((a, b) => a - b));
     });
-    await check("history only contains its own channel", () =>
-      assert.ok(history.data.every((m) => m.channel === "customer_rider"))
+    await check("the first message is still the first one sent", () =>
+      assert.equal(history.body.data[0].message, "I am outside the building")
     );
-    await check("history entries carry senderRole and senderId", () =>
-      assert.ok(history.data.every((m) => m.senderRole && m.senderId))
+    await check("history never mixes in the other channel", () =>
+      assert.ok(history.body.data.every((m) => m.channel === "customer_rider"))
     );
+    await check("history never leaks the restaurant thread's messages", () => {
+      const texts = history.body.data.map((m) => m.message);
+      assert.ok(!texts.includes("Order is packed and ready"));
+      assert.ok(!texts.includes("Picking it up now"));
+    });
 
-    const restaurantHistory = await (
-      await api(`/api/chat/${orderId}/restaurant_rider`, tokens.restaurant)
-    ).json();
-    await check("restaurant can fetch restaurant_rider history", () => {
-      const texts = restaurantHistory.data.map((m) => m.message);
-      assert.ok(texts.includes("Order is packed and ready"));
+    const restaurantHistory = await get(restaurantRider, tokens.restaurant);
+    await check("restaurant reads the restaurant_rider thread", () => {
+      assert.ok(restaurantHistory.body.count >= 2);
+      assert.ok(
+        restaurantHistory.body.data.every((m) => m.channel === "restaurant_rider")
+      );
+    });
+    await check("rider sees both threads, each with its own messages", async () => {
+      const cr = await get(customerRider, tokens.rider);
+      const rr = await get(restaurantRider, tokens.rider);
+      assert.ok(cr.body.data.every((m) => m.channel === "customer_rider"));
+      assert.ok(rr.body.data.every((m) => m.channel === "restaurant_rider"));
+    });
+
+    // ================= POLLING =================
+    console.log("\n[4] Polling with ?since=");
+    const beforePoll = await get(customerRider, tokens.customer);
+    const lastSeen = beforePoll.body.data.at(-1).createdAt;
+
+    const emptyPoll = await get(
+      `${customerRider}?since=${encodeURIComponent(lastSeen)}`,
+      tokens.customer
+    );
+    await check("polling with the newest message's timestamp returns nothing new", () => {
+      // $gte may re-include the boundary message itself, but nothing after it.
+      assert.ok(emptyPoll.body.count <= 1);
+      assert.ok(emptyPoll.body.data.every((m) => m.createdAt === lastSeen));
+    });
+
+    await sleep(20);
+    const newMessage = await post(customerRider, tokens.customer, {
+      message: "are you close?",
+    });
+    const polled = await get(
+      `${customerRider}?since=${encodeURIComponent(lastSeen)}`,
+      tokens.customer
+    );
+    await check("a poll picks up exactly the message sent since the last poll", () => {
+      const ids = polled.body.data.map((m) => m._id);
+      assert.ok(ids.includes(newMessage.body.data._id));
+      assert.equal(polled.body.count <= 2, true); // the new one, maybe the boundary one
+    });
+    await check("the polled message is the only new content", () => {
+      const fresh = polled.body.data.filter((m) => m.createdAt !== lastSeen);
+      assert.equal(fresh.length, 1);
+      assert.equal(fresh[0].message, "are you close?");
+    });
+    await check("polling never returns old messages", () => {
+      const texts = polled.body.data.map((m) => m.message);
       assert.ok(!texts.includes("I am outside the building"));
+      assert.ok(!texts.includes("On my way"));
     });
-
-    const riderHistory = await (
-      await api(`/api/chat/${orderId}/customer_rider`, tokens.rider)
-    ).json();
-    await check("rider can fetch customer_rider history", () =>
-      assert.equal(riderHistory.count, history.count)
-    );
-
-    await check("outsider gets 403 on history", async () => {
-      const res = await api(`/api/chat/${orderId}/customer_rider`, tokens.outsider);
-      assert.equal(res.status, 403);
-      assert.equal((await res.json()).success, false);
-    });
-    await check("customer gets 403 on the restaurant_rider history", async () => {
-      const res = await api(`/api/chat/${orderId}/restaurant_rider`, tokens.customer);
+    await check("polling respects the participant check", async () => {
+      const res = await get(
+        `${customerRider}?since=${encodeURIComponent(lastSeen)}`,
+        tokens.outsider
+      );
       assert.equal(res.status, 403);
     });
-    await check("history without a token gets 401", async () => {
-      const res = await api(`/api/chat/${orderId}/customer_rider`);
-      assert.equal(res.status, 401);
+    await check("a malformed since value is rejected", async () => {
+      const res = await get(`${customerRider}?since=not-a-date`, tokens.customer);
+      assert.equal(res.status, 400);
+      assert.equal(res.body.success, false);
     });
-    await check("history for an unknown order gets 404", async () => {
-      const res = await api(
+
+    // Simulate what a polling loop sees across two polls: nothing is missed.
+    await check("polling repeatedly never misses a message", async () => {
+      const seen = new Map();
+      let cursor = null;
+
+      const collect = async () => {
+        const url = cursor ? `${customerRider}?since=${encodeURIComponent(cursor)}` : customerRider;
+        const res = await get(url, tokens.customer);
+        for (const m of res.body.data) seen.set(m._id, m.message);
+        cursor = res.body.data.at(-1)?.createdAt ?? cursor;
+      };
+
+      await collect(); // initial page load
+
+      const sent = [];
+      for (const text of ["poll one", "poll two", "poll three"]) {
+        await post(customerRider, tokens.customer, { message: text });
+        sent.push(text);
+        await collect(); // a poll between each send, like a real interval
+      }
+
+      for (const text of sent) {
+        assert.ok(
+          [...seen.values()].includes(text),
+          `missed "${text}" while polling`
+        );
+      }
+    });
+
+    // ================= PARTICIPANT ENFORCEMENT =================
+    console.log("\n[5] Non-participants are rejected");
+    await check("outsider cannot read a thread", async () => {
+      const res = await get(customerRider, tokens.outsider);
+      assert.equal(res.status, 403);
+      assert.equal(res.body.success, false);
+    });
+    await check("outsider cannot send into a thread", async () => {
+      const res = await post(customerRider, tokens.outsider, { message: "let me in" });
+      assert.equal(res.status, 403);
+    });
+    await check("customer cannot read the restaurant_rider thread", async () => {
+      const res = await get(restaurantRider, tokens.customer);
+      assert.equal(res.status, 403);
+    });
+    await check("customer cannot send into the restaurant_rider thread", async () => {
+      const res = await post(restaurantRider, tokens.customer, { message: "nope" });
+      assert.equal(res.status, 403);
+    });
+    await check("restaurant cannot read the customer_rider thread", async () => {
+      const res = await get(customerRider, tokens.restaurant);
+      assert.equal(res.status, 403);
+    });
+    await check("a rider not assigned to the order cannot read", async () => {
+      const res = await get(`/api/chat/${noRiderOrderId}/customer_rider`, tokens.rider);
+      assert.equal(res.status, 403);
+    });
+    await check("a rider not assigned to the order cannot send", async () => {
+      const res = await post(`/api/chat/${noRiderOrderId}/customer_rider`, tokens.rider, {
+        message: "hello?",
+      });
+      assert.equal(res.status, 403);
+    });
+    await check("the customer of that order can still read it", async () => {
+      const res = await get(`/api/chat/${noRiderOrderId}/customer_rider`, tokens.customer);
+      assert.equal(res.status, 200);
+      assert.equal(res.body.count, 0);
+    });
+
+    // ================= BAD INPUT =================
+    console.log("\n[6] Bad input is rejected");
+    await check("an unknown channel is refused (read)", async () => {
+      const res = await get(`/api/chat/${orderId}/customer_restaurant`, tokens.customer);
+      assert.equal(res.status, 400);
+      assert.equal(res.body.message, "Invalid channel");
+    });
+    await check("an unknown channel is refused (send)", async () => {
+      const res = await post(`/api/chat/${orderId}/customer_restaurant`, tokens.customer, {
+        message: "hi",
+      });
+      assert.equal(res.status, 400);
+      assert.equal(res.body.message, "Invalid channel");
+    });
+    await check("a missing message is refused", async () => {
+      const res = await post(customerRider, tokens.customer, {});
+      assert.equal(res.status, 400);
+      assert.equal(res.body.message, "message is required");
+    });
+    await check("a whitespace-only message is refused", async () => {
+      const res = await post(customerRider, tokens.customer, { message: "    " });
+      assert.equal(res.status, 400);
+      assert.equal(res.body.message, "message is required");
+    });
+    await check("a non-string message is refused", async () => {
+      const res = await post(customerRider, tokens.customer, { message: 12345 });
+      assert.equal(res.status, 400);
+    });
+    await check("an over-long message is refused", async () => {
+      const res = await post(customerRider, tokens.customer, { message: "x".repeat(2001) });
+      assert.equal(res.status, 400);
+      assert.match(res.body.message, /2000 characters or fewer/);
+    });
+    await check("a message of exactly the limit is accepted", async () => {
+      const res = await post(customerRider, tokens.customer, { message: "y".repeat(2000) });
+      assert.equal(res.status, 201);
+    });
+    await check("a malformed orderId is refused", async () => {
+      const res = await get("/api/chat/not-an-id/customer_rider", tokens.customer);
+      assert.equal(res.status, 400);
+      assert.equal(res.body.message, "Invalid orderId");
+    });
+    await check("an order that does not exist is refused", async () => {
+      const res = await get(
         `/api/chat/${new mongoose.Types.ObjectId()}/customer_rider`,
         tokens.customer
       );
       assert.equal(res.status, 404);
+      assert.equal(res.body.message, "Order not found");
     });
-    await check("history for an invalid channel gets 400", async () => {
-      const res = await api(`/api/chat/${orderId}/customer_restaurant`, tokens.customer);
-      assert.equal(res.status, 400);
+    await check("reading without a token gets 401", async () => {
+      const res = await get(customerRider);
+      assert.equal(res.status, 401);
+    });
+    await check("sending without a token gets 401", async () => {
+      const res = await post(customerRider, undefined, { message: "hi" });
+      assert.equal(res.status, 401);
+    });
+    await check("sending with a bad token gets 401", async () => {
+      const res = await post(customerRider, "not-a-real-token", { message: "hi" });
+      assert.equal(res.status, 401);
     });
 
-    // ================= PERSISTENCE SHAPE =================
-    console.log("\n[8] Persisted message shape");
-    const ChatMessage = require("../models/ChatMessage");
+    // ================= PERSISTENCE =================
+    console.log("\n[7] Persisted message shape");
     await mongoose.connect(uri, { dbName: DB_NAME });
     const stored = await ChatMessage.find({ orderId }).sort({ createdAt: 1 });
-    await check("messages were actually written to the chatMessage collection", () =>
-      assert.ok(stored.length >= 6)
+    await check("messages were written to the chatMessage collection", () =>
+      assert.ok(stored.length >= 9)
     );
     await check("stored messages have every required field", () =>
       assert.ok(
@@ -541,12 +527,16 @@ async function main() {
         )
       )
     );
-    await check("stored channels are only the two allowed values", () =>
+    await check("only the two allowed channels were ever stored", () =>
       assert.ok(stored.every((m) => ["customer_rider", "restaurant_rider"].includes(m.channel)))
     );
+    await check("only the three allowed roles were ever stored", () =>
+      assert.ok(stored.every((m) => ["customer", "rider", "restaurant"].includes(m.senderRole)))
+    );
+    await check("orderId is stored as a real ObjectId reference", () =>
+      assert.ok(stored.every((m) => m.orderId instanceof mongoose.Types.ObjectId))
+    );
     await mongoose.disconnect();
-
-    [customerSocket, riderSocket, restaurantSocket, outsiderSocket].forEach((s) => s.disconnect());
   } finally {
     server.kill();
     await sleep(300);
