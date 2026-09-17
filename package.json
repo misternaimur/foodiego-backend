@@ -7,6 +7,7 @@
     "start": "nodemon index.js",
     "dev": "nodemon index.js",
     "test:chat": "node tests/chat.e2e.test.js",
+    "demo:chat": "node tests/chat.demo.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
