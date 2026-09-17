@@ -15,6 +15,7 @@
 // ============================================================
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
+const http = require("node:http");
 const path = require("node:path");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
@@ -22,6 +23,7 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 
 const JWT_SECRET = "test-secret-for-chat-e2e";
 const PORT = 8991;
+const ENTRY_PORT = 8992; // the "Vercel" entry path runs on its own port
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const DB_NAME = "FoodBackend"; // config/db.js pins this name
 
@@ -537,6 +539,74 @@ async function main() {
       assert.ok(stored.every((m) => m.orderId instanceof mongoose.Types.ObjectId))
     );
     await mongoose.disconnect();
+
+    // ================= THE VERCEL ENTRY PATH =================
+    // On Vercel this file is required as a serverless module, so
+    // `require.main === module` is false and the app is served from the
+    // exported `app`. Chat must work in exactly that shape - this section
+    // requiring the file the same way Vercel does, on its own port.
+    console.log("\n[8] Chat works when index.js is required as a module (the Vercel path)");
+    process.env.MONGODB_URL = uri;
+    process.env.JWT_SECRET = JWT_SECRET;
+
+    // eslint-disable-next-line global-require
+    const exportedApp = require("../index.js");
+    await check("requiring index.js returns the Express app without listening", () =>
+      assert.equal(typeof exportedApp, "function")
+    );
+
+    // index.js kicks off connectDB() at module load and does not await it, so
+    // wait for the connection to be established before asserting on responses.
+    for (let attempt = 0; attempt < 40 && mongoose.connection.readyState !== 1; attempt += 1) {
+      await sleep(100);
+    }
+    await check("index.js opened the MongoDB connection on its own", () =>
+      assert.equal(mongoose.connection.readyState, 1)
+    );
+
+    const entryServer = http.createServer(exportedApp);
+    await new Promise((resolve) => entryServer.listen(ENTRY_PORT, resolve));
+    const onEntry = async (method, pathname, { token, body } = {}) => {
+      const headers = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const res = await fetch(`http://127.0.0.1:${ENTRY_PORT}${pathname}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      return { status: res.status, body: await res.json() };
+    };
+
+    try {
+      await check("a normal HTTP route is served from the exported app", async () => {
+        const res = await onEntry("GET", "/api/orders");
+        assert.equal(res.status, 200, `unexpected body: ${JSON.stringify(res.body)}`);
+        assert.equal(res.body.success, true);
+      });
+      await check("the participant check still rejects strangers", async () => {
+        const res = await onEntry("GET", customerRider, { token: tokens.outsider });
+        assert.equal(res.status, 403);
+      });
+      await check("sending over the exported app persists a message", async () => {
+        const res = await onEntry("POST", customerRider, {
+          token: tokens.customer,
+          body: { message: "sent through the Vercel entry path" },
+        });
+        assert.equal(res.status, 201);
+        assert.equal(res.body.data.senderRole, "customer");
+      });
+      await check("reading over the exported app returns it", async () => {
+        const res = await onEntry("GET", customerRider, { token: tokens.customer });
+        assert.equal(res.status, 200);
+        assert.ok(
+          res.body.data.some((m) => m.message === "sent through the Vercel entry path")
+        );
+      });
+    } finally {
+      await new Promise((resolve) => entryServer.close(resolve));
+      await mongoose.disconnect();
+    }
   } finally {
     server.kill();
     await sleep(300);
