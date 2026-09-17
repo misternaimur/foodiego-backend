@@ -5,26 +5,31 @@
 // the running API - nothing is written to MongoDB directly, so every
 // record goes through the same validation a real client would hit.
 //
-// Each restaurant needs an owner account because POST /api/categories and
-// POST /api/menu are owner-protected on the server side.
+// One owner account per restaurant, so each restaurant is owned by a
+// different login and the owner-scoped routes behave like real data:
 //
-// They all share ONE demo owner account, and that is deliberate rather than
-// an oversight. The shared "users" collection carries a unique, non-sparse
-// index on "uid" (created by the frontend's User model, which declares
-// `uid: { unique: true, required: true }`). This backend's register endpoint
-// never sets uid, so only one account without a uid can exist at a time -
-// a second register returns 500 with E11000 duplicate key on uid_1.
-// Reusing one owner keeps the seed working without touching that index.
-// Override the account with SEED_OWNER_EMAIL / SEED_OWNER_PASSWORD.
-//
-//   owner user (role: restaurant, shared)
-//     -> restaurant profile (linked by userId)
+//   owner user (role: restaurant)  -- one per restaurant
+//     -> one restaurant profile (linked by userId)
 //          -> 3-4 categories
 //               -> 5-6 menu items each
 //
-// Re-running is safe: the owner is logged into if it already exists,
-// an existing restaurant is reused, and a restaurant that already has
-// categories is skipped.
+// The users collection carries a unique, NON-sparse index on "uid"
+// (uid_1), created by the frontend's User model which declares
+// `uid: { unique: true, required: true }`, while POST /api/users/register
+// never sets uid. MongoDB's unique index allows only one document with a
+// missing/null uid, so a second registration fails with 500 E11000
+// duplicate key on uid_1.
+//
+// To get past it this script assigns a unique uid straight to each newly
+// registered owner (the API has no route for it). That frees the single
+// null slot for the next registration. Everything else is created through
+// the API. The proper fix is a sparse index in both models - see the note
+// in the commit that added this file.
+//
+// Re-running is safe: an existing owner is logged into instead of
+// registered again, an existing restaurant is reused (and moved to its own
+// owner if it is still on someone else's), and a restaurant that already
+// has categories is skipped.
 //
 // Start the backend first, then:
 //   node scripts/seed-restaurants.js
@@ -32,6 +37,7 @@
 // Environment overrides:
 //   BASE_URL           API base, default http://127.0.0.1:8000
 //   SEED_RESTAURANTS   how many restaurants, default 15 (10-20)
+//   SEED_OWNER_PASSWORD  password for the owner accounts, default DemoPass123!
 //   SEED_DRY=1         print the plan without posting anything
 //   SEED_PURGE=1       delete the seeded demo data again (direct DB)
 // ============================================================
@@ -40,12 +46,10 @@ const BASE_URL = process.env.BASE_URL || "http://127.0.0.1:8000";
 const HOW_MANY = Number(process.env.SEED_RESTAURANTS || 15);
 const DRY_RUN = process.env.SEED_DRY === "1";
 
-// Every seeded account uses this domain, so the demo data is easy to
-// find and delete later.
+// Every seeded account and contact address uses this domain, so the demo
+// data is easy to find and delete again.
 const EMAIL_DOMAIN = "foodiego.test";
 const PASSWORD = process.env.SEED_OWNER_PASSWORD || "DemoPass123!";
-const OWNER_EMAIL = process.env.SEED_OWNER_EMAIL || `owner.demo@${EMAIL_DOMAIN}`;
-const OWNER_NAME = "Foodiego Demo Owner";
 
 const AREAS = [
   "House 42, Road 7, Dhanmondi, Dhaka",
@@ -273,6 +277,21 @@ function priceFor(categoryName) {
 
 let requestCount = 0;
 
+// Direct database handle, used only for the two things the API cannot do:
+// assigning a uid (no route exists for it) and purging. Everything else in
+// this script goes through HTTP.
+let mongoose = null;
+let directDb = null;
+
+async function openDb() {
+  if (directDb) return directDb;
+  mongoose = require("mongoose");
+  require("dotenv").config();
+  await mongoose.connect(process.env.MONGODB_URL, { dbName: "FoodBackend" });
+  directDb = mongoose.connection.db;
+  return directDb;
+}
+
 async function api(method, pathname, { token, body, tolerate = [] } = {}) {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -312,40 +331,79 @@ async function api(method, pathname, { token, body, tolerate = [] } = {}) {
 }
 
 // Registers the shared demo owner, or logs into it if it is already there,
-// so the script can be run more than once. The 500 is tolerated because a
-// taken "uid" slot makes registering an existing owner fail that way - see
-// the note at the top of this file.
-async function ensureSharedOwner() {
+// so the script can be run more than once. A 500 is tolerated on register
+// because a still-taken "uid" slot makes it fail that way - see the note at
+// the top of this file.
+async function ensureOwner(venue) {
+  const slug = slugify(venue.restaurantName);
+  const email = `owner.${slug}@${EMAIL_DOMAIN}`;
+  const name = `${venue.restaurantName} Manager`;
+
   const registered = await api("POST", "/api/users/register", {
-    body: { name: OWNER_NAME, email: OWNER_EMAIL, password: PASSWORD, role: "restaurant" },
+    body: { name, email, password: PASSWORD, role: "restaurant" },
     tolerate: [500],
   });
 
+  let token;
+  let userId;
+  let created;
+
   if (registered.status === 201) {
-    return { token: registered.body.token, userId: registered.body.data._id, created: true };
+    token = registered.body.token;
+    userId = registered.body.data._id;
+    created = true;
+  } else {
+    const loggedIn = await api("POST", "/api/users/login", {
+      body: { email, password: PASSWORD },
+    });
+    if (loggedIn.status !== 200) {
+      throw new Error(
+        `could not register or log in as ${email}. ` +
+          `If this owner already exists under a different password, pass ` +
+          `SEED_OWNER_PASSWORD. Response: ${JSON.stringify(loggedIn.body)}`
+      );
+    }
+    token = loggedIn.body.token;
+    userId = loggedIn.body.data._id;
+    created = false;
   }
 
-  const loggedIn = await api("POST", "/api/users/login", {
-    body: { email: OWNER_EMAIL, password: PASSWORD },
-  });
-  if (loggedIn.status !== 200) {
-    throw new Error(
-      `could not register or log in as ${OWNER_EMAIL}. ` +
-        `If the shared demo owner already exists under a different password, ` +
-        `pass SEED_OWNER_PASSWORD. Response: ${JSON.stringify(loggedIn.body)}`
-    );
+  // Free the single null-uid slot so the next owner can register.
+  if (!DRY_RUN) {
+    const db = await openDb();
+    const user = await db
+      .collection("users")
+      .findOne({ _id: mongoose.Types.ObjectId.createFromHexString(String(userId)) }, { projection: { uid: 1 } });
+    if (user && !user.uid) {
+      await db.collection("users").updateOne(
+        { _id: user._id },
+        { $set: { uid: `demo-${slug}-${Math.random().toString(36).slice(2, 10)}` } }
+      );
+    }
   }
-  return { token: loggedIn.body.token, userId: loggedIn.body.data._id, created: false };
+
+  return { token, userId, email, name, created };
 }
 
-// Reuses the restaurant if one with this name already exists. Matching is by
-// name rather than by userId because every seeded restaurant shares one owner.
+// Reuses the restaurant if one with this name already exists. If it is still
+// owned by somebody else (for example after switching from a single shared
+// owner to one owner per restaurant), it is handed to this owner.
 async function ensureRestaurant(owner, venue, index) {
   const all = await api("GET", "/api/restaurants");
   const existing = (all.body.data || []).find(
     (r) => r.restaurantName === venue.restaurantName
   );
-  if (existing) return { restaurant: existing, existed: true };
+
+  if (existing) {
+    const currentOwnerId = String(existing.userId?._id || existing.userId);
+    if (currentOwnerId === String(owner.userId)) {
+      return { restaurant: existing, existed: true, reassigned: false };
+    }
+    const moved = await api("PUT", `/api/restaurants/${existing._id}`, {
+      body: { userId: owner.userId, ownerName: owner.name },
+    });
+    return { restaurant: moved.body.data, existed: true, reassigned: true };
+  }
 
   const opening = `${String(randomInt(8, 11)).padStart(2, "0")}:00`;
   const closing = `${String(randomInt(21, 23)).padStart(2, "0")}:30`;
@@ -354,7 +412,7 @@ async function ensureRestaurant(owner, venue, index) {
     body: {
       userId: owner.userId,
       restaurantName: venue.restaurantName,
-      ownerName: OWNER_NAME,
+      ownerName: owner.name,
       email: `contact.${slugify(venue.restaurantName)}@${EMAIL_DOMAIN}`,
       phone: pick(PHONES),
       address: AREAS[index % AREAS.length],
@@ -368,7 +426,7 @@ async function ensureRestaurant(owner, venue, index) {
       rating: Number((randomInt(35, 50) / 10).toFixed(1)),
     },
   });
-  return { restaurant: created.body.data, existed: false };
+  return { restaurant: created.body.data, existed: false, reassigned: false };
 }
 
 async function ensureMenu(owner, restaurantId, venue) {
@@ -421,38 +479,45 @@ async function ensureMenu(owner, restaurantId, venue) {
 // ------------------------------------------------------------
 // This is the one part that does not go through the API: there is no
 // DELETE endpoint for categories at all, so removing a seeded restaurant
-// cleanly needs direct database access. It only ever touches rows that
-// this script creates - restaurants whose owner is the shared demo owner,
-// plus their categories, menu items and the owner account itself.
+// cleanly needs direct database access. It only ever touches rows in this
+// script's namespace - owner accounts on the demo email domain, the
+// restaurants those owners hold, and their categories and menu items.
 async function purge() {
-  const mongoose = require("mongoose");
-  require("dotenv").config();
-  await mongoose.connect(process.env.MONGODB_URL, { dbName: "FoodBackend" });
-  const db = mongoose.connection.db;
+  const db = await openDb();
 
-  const owner = await db.collection("users").findOne({ email: OWNER_EMAIL });
-  if (!owner) {
-    console.log(`Nothing to purge: no ${EMAIL_DOMAIN} owner account found.`);
-    process.exit(0);
+  const owners = await db
+    .collection("users")
+    .find({ email: new RegExp(`@${EMAIL_DOMAIN.replace(/\./g, "\\.")}$`) })
+    .project({ _id: 1, email: 1 })
+    .toArray();
+
+  if (owners.length === 0) {
+    console.log(`Nothing to purge: no ${EMAIL_DOMAIN} accounts found.`);
+    await mongoose.disconnect();
+    return;
   }
 
+  const ownerIds = owners.map((o) => o._id);
   const restaurants = await db
     .collection("restaurant")
-    .find({ userId: owner._id })
-    .project({ _id: 1, restaurantName: 1 })
+    .find({ userId: { $in: ownerIds } })
+    .project({ _id: 1, restaurantName: 1, userId: 1 })
     .toArray();
   const ids = restaurants.map((r) => r._id);
 
   const items = await db.collection("menuItem").deleteMany({ restaurantId: { $in: ids } });
   const categories = await db.collection("category").deleteMany({ restaurantId: { $in: ids } });
   const removed = await db.collection("restaurant").deleteMany({ _id: { $in: ids } });
-  await db.collection("users").deleteOne({ _id: owner._id });
+  const users = await db.collection("users").deleteMany({ _id: { $in: ownerIds } });
 
-  console.log(`Purged ${removed.deletedCount} demo restaurants:`);
+  console.log(`Purged ${removed.deletedCount} demo restaurants and ${users.deletedCount} owner accounts:`);
   restaurants.forEach((r) => console.log(`  - ${r.restaurantName}`));
-  console.log(`  ${categories.deletedCount} categories, ${items.deletedCount} menu items, 1 owner account`);
-  console.log("\nNote: deleting this owner also frees the single uid-less slot,");
-  console.log("so POST /api/users/register works once more until it is taken again.");
+  console.log(`  ${categories.deletedCount} categories, ${items.deletedCount} menu items`);
+  if (owners.length !== restaurants.length) {
+    console.log(`  (${owners.length - restaurants.length} demo accounts owned no restaurant)`);
+  }
+  console.log("\nNote: this frees the single uid-less slot, so one more");
+  console.log("POST /api/users/register will work until it is taken again.");
   await mongoose.disconnect();
 }
 
@@ -479,40 +544,58 @@ async function main() {
   const venues = [];
   for (let i = 0; i < HOW_MANY; i += 1) venues.push(VENUES[i % VENUES.length]);
 
-  const owner = await ensureSharedOwner();
-  console.log(
-    `Owner: ${OWNER_EMAIL} (${owner.created ? "registered now" : "already existed, logged in"})\n`
-  );
-
-  let totals = { restaurants: 0, existingRestaurants: 0, categories: 0, items: 0, skippedMenus: 0 };
+  let totals = {
+    owners: 0,
+    existingOwners: 0,
+    restaurants: 0,
+    existingRestaurants: 0,
+    reassigned: 0,
+    categories: 0,
+    items: 0,
+    skippedMenus: 0,
+  };
 
   for (let i = 0; i < venues.length; i += 1) {
     const venue = venues[i];
     const label = HOW_MANY > VENUES.length ? `${venue.restaurantName} #${i + 1}` : venue.restaurantName;
 
-    const { restaurant, existed } = await ensureRestaurant(owner, venue, i);
+    const owner = await ensureOwner(venue);
+    const { restaurant, existed, reassigned } = await ensureRestaurant(owner, venue, i);
     const menu = await ensureMenu(owner, restaurant._id, venue);
 
+    if (owner.created) totals.owners += 1;
+    else totals.existingOwners += 1;
     if (existed) totals.existingRestaurants += 1;
     else totals.restaurants += 1;
+    if (reassigned) totals.reassigned += 1;
     if (menu.skipped) totals.skippedMenus += 1;
     totals.categories += menu.categories;
     totals.items += menu.items;
 
+    const menuNote = menu.skipped
+      ? "menu already seeded"
+      : `${menu.categories} categories, ${menu.items} items`;
+
     console.log(
       `${String(i + 1).padStart(2)}. ${label.padEnd(34)} ${venue.cuisineType.padEnd(14)} ` +
-        `${menu.skipped ? "already had categories, skipped" : `${menu.categories} categories, ${menu.items} items`}`
+        `${menuNote}${reassigned ? "  [moved to its own owner]" : ""}`
     );
   }
 
   console.log(`\n${"-".repeat(72)}`);
+  console.log(`owners created      : ${totals.owners}${totals.existingOwners ? ` (${totals.existingOwners} already existed)` : ""}`);
   console.log(`restaurants created : ${totals.restaurants}`);
-  console.log(`restaurants reused  : ${totals.existingRestaurants}`);
+  console.log(`restaurants reused  : ${totals.existingRestaurants}${totals.reassigned ? ` (${totals.reassigned} moved to their own owner)` : ""}`);
   console.log(`categories created  : ${totals.categories}`);
   console.log(`menu items created  : ${totals.items}`);
   if (totals.skippedMenus) console.log(`menus skipped       : ${totals.skippedMenus}`);
   console.log(`API requests made   : ${requestCount}`);
-  console.log(`\nAll owner accounts use the ${EMAIL_DOMAIN} domain, e.g. ${OWNER_EMAIL}`);
+  console.log(`\nEach restaurant has its own owner account on the ${EMAIL_DOMAIN} domain:`);
+  console.log(`  owner.<restaurant>@${EMAIL_DOMAIN}   password: ${PASSWORD}`);
+
+  // openDb() is lazy and only used when assigning uids; its mongoose
+  // connection would otherwise keep this process alive after the work is done.
+  if (directDb) await mongoose.disconnect();
 }
 
 main().catch((error) => {
