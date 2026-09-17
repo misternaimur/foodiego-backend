@@ -56,6 +56,23 @@ router.get("/", async (req, res) => {
   }
 });
 
+// --- STEP 2.5: Get recent orders (Admin only) ----------------------
+// GET /api/orders/recent
+router.get("/recent", protect, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ success: false, message: "Not authorized as admin" });
+    }
+    const orders = await OrderBooking.find()
+      .populate("restaurantId", "restaurantName")
+      .sort({ createdAt: -1 })
+      .limit(20);
+    res.status(200).json({ success: true, count: orders.length, data: orders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // --- STEP 3: Get a single order by id -----------------------------------
 // GET /api/orders/:id
 router.get("/:id", async (req, res) => {
