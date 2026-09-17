@@ -6,6 +6,8 @@
   "scripts": {
     "start": "nodemon index.js",
     "dev": "nodemon index.js",
+    "test:chat": "node tests/chat.e2e.test.js",
+    "demo:chat": "node tests/chat.demo.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -28,5 +30,8 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^9.9.3",
     "nodemon": "^3.1.14"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.2.0"
   }
 }
