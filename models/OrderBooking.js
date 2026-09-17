@@ -8,7 +8,10 @@ const mongoose = require("mongoose");
 // ============================================================
 const orderItemSchema = new mongoose.Schema(
   {
-    menuItemId: { type: mongoose.Schema.Types.ObjectId, ref: "MenuItem", required: true },
+    // A real MenuItem id when the item came from a vendor's DB-backed menu,
+    // or any catalog id (e.g. from the demo food list) otherwise - so this
+    // is a plain string rather than a strict ObjectId reference.
+    menuItemId: { type: String, required: true, trim: true },
     name: { type: String, required: true, trim: true },
     price: { type: Number, required: true, min: 0 },
     quantity: { type: Number, required: true, min: 1, default: 1 },
@@ -19,7 +22,10 @@ const orderItemSchema = new mongoose.Schema(
 const orderBookingSchema = new mongoose.Schema(
   {
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    restaurantId: { type: mongoose.Schema.Types.ObjectId, ref: "Restaurant", required: true },
+    // Optional: set when the order matches a real Restaurant document.
+    restaurantId: { type: mongoose.Schema.Types.ObjectId, ref: "Restaurant" },
+    // Always set, even when restaurantId couldn't be resolved (demo catalog).
+    restaurantName: { type: String, trim: true },
     riderId: { type: mongoose.Schema.Types.ObjectId, ref: "Rider" }, // assigned after booking
     items: {
       type: [orderItemSchema],
@@ -27,7 +33,11 @@ const orderBookingSchema = new mongoose.Schema(
       validate: (items) => Array.isArray(items) && items.length > 0,
     },
     totalAmount: { type: Number, required: true, min: 0 },
+    deliveryFee: { type: Number, default: 0, min: 0 },
     deliveryAddress: { type: String, required: true, trim: true },
+    // Used to match this order against riders registered in the same city
+    // for the "available deliveries near you" list.
+    city: { type: String, trim: true },
     paymentMethod: {
       type: String,
       enum: ["cash", "card", "online"],

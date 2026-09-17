@@ -38,6 +38,22 @@ const userSchema = new mongoose.Schema(
       enum: ["customer", "restaurant", "rider", "admin"],
       default: "customer",
     },
+    // Food/menu-item ids the customer has favorited.
+    favorites: { type: [String], default: [] },
+    // Saved delivery addresses for the customer's account.
+    addresses: {
+      type: [
+        {
+          label: { type: String, default: "Home" },
+          fullName: { type: String, trim: true },
+          phone: { type: String, trim: true },
+          addressLine: { type: String, trim: true },
+          city: { type: String, trim: true },
+          isDefault: { type: Boolean, default: false },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );
