@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const OrderBooking = require("../models/OrderBooking");
 const MenuItem = require("../models/MenuItem");
 const Restaurant = require("../models/Restaurant");
@@ -16,25 +17,40 @@ const router = express.Router();
 
 // --- STEP 1: Create an order (a customer places a booking) --------
 // POST /api/orders
+//
+// items[].menuItemId only gets validated against the MenuItem collection
+// when it looks like a real Mongo id - the customer-facing catalog today is
+// still a static demo list (ids like "food-1"), so those pass through as
+// opaque identifiers instead of being rejected.
 router.post("/", async (req, res) => {
   try {
-    const { items } = req.body;
+    const { items, restaurantId, restaurantName } = req.body;
     if (items && Array.isArray(items)) {
       for (const item of items) {
         if (!item.menuItemId) {
           return res.status(400).json({ success: false, message: "Missing menuItemId in order item" });
         }
-        const menuItem = await MenuItem.findById(item.menuItemId);
-        if (!menuItem) {
-          return res.status(400).json({ success: false, message: `Invalid menuItemId: ${item.menuItemId}` });
-        }
-        if (menuItem.isAvailable === false) {
-          return res.status(400).json({ success: false, message: `Item is unavailable: ${menuItem.name}` });
+        if (mongoose.Types.ObjectId.isValid(item.menuItemId)) {
+          const menuItem = await MenuItem.findById(item.menuItemId);
+          if (menuItem && menuItem.isAvailable === false) {
+            return res.status(400).json({ success: false, message: `Item is unavailable: ${menuItem.name}` });
+          }
         }
       }
     }
 
-    const order = await OrderBooking.create(req.body);
+    const payload = { ...req.body };
+
+    // Resolve a real Restaurant document by name when no explicit id was
+    // given, so the order links to it whenever one exists.
+    if (!restaurantId && restaurantName) {
+      const match = await Restaurant.findOne({
+        restaurantName: new RegExp(`^${restaurantName.trim()}$`, "i"),
+      });
+      if (match) payload.restaurantId = match._id;
+    }
+
+    const order = await OrderBooking.create(payload);
     res.status(201).json({ success: true, data: order });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -136,6 +152,21 @@ router.get("/restaurant/:restaurantId", protect, async (req, res) => {
     const orders = await OrderBooking.find({ restaurantId: req.params.restaurantId })
       .populate("customerId", "name email")
       .populate("riderId", "name")
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({ success: true, count: orders.length, data: orders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// --- STEP 6.5: Get orders placed by a specific customer -------------
+// GET /api/orders/customer/:customerId
+router.get("/customer/:customerId", async (req, res) => {
+  try {
+    const orders = await OrderBooking.find({ customerId: req.params.customerId })
+      .populate("restaurantId", "restaurantName logoUrl")
+      .populate("riderId", "fullName phone")
       .sort({ createdAt: -1 });
 
     res.status(200).json({ success: true, count: orders.length, data: orders });
