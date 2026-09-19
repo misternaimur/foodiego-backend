@@ -15,6 +15,7 @@ const orderItemSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
     price: { type: Number, required: true, min: 0 },
     quantity: { type: Number, required: true, min: 1, default: 1 },
+    specialInstructions: { type: String, trim: true },
   },
   { _id: false }
 );
@@ -35,6 +36,10 @@ const orderBookingSchema = new mongoose.Schema(
     totalAmount: { type: Number, required: true, min: 0 },
     deliveryFee: { type: Number, default: 0, min: 0 },
     deliveryAddress: { type: String, required: true, trim: true },
+    // Free-text delivery instructions from the customer at checkout (gate
+    // code, floor number, "leave with security" etc.) - separate from any
+    // per-item specialInstructions above.
+    deliveryNote: { type: String, trim: true },
     // Used to match this order against riders registered in the same city
     // for the "available deliveries near you" list.
     city: { type: String, trim: true },
@@ -50,9 +55,18 @@ const orderBookingSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "confirmed", "preparing", "out_for_delivery", "delivered", "cancelled"],
+      enum: ["pending", "confirmed", "preparing", "ready", "out_for_delivery", "delivered", "cancelled"],
       default: "pending",
     },
+    refundStatus: { type: String, enum: ["pending", "approved", "rejected"] },
+    // Real timestamps for the two rider-triggered handoffs, so delivery
+    // duration can be reported honestly instead of guessed from updatedAt.
+    pickedUpAt: { type: Date },
+    deliveredAt: { type: Date },
+    // UPDATE (rider-rating fix): one rating per delivered order, used to
+    // recompute Rider.rating as a simple average - see the
+    // PATCH /:id/rider-rating route below.
+    riderRating: { type: Number, min: 1, max: 5 },
   },
   { timestamps: true }
 );
