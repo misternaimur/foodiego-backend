@@ -1,0 +1,59 @@
+const express = require("express");
+const Category = require("../models/Category");
+const Restaurant = require("../models/Restaurant");
+const { protect } = require("../middleware/auth");
+
+const router = express.Router();
+
+// POST /api/categories
+router.post("/", protect, async (req, res) => {
+  try {
+    const restaurant = await Restaurant.findById(req.body.restaurantId);
+    if (!restaurant) {
+      return res.status(404).json({ success: false, message: "Restaurant not found" });
+    }
+    if (restaurant.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ success: false, message: "Not authorized to create categories for this restaurant" });
+    }
+
+    const category = await Category.create(req.body);
+    res.status(201).json({ success: true, data: category });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// GET /api/categories/restaurant/:restaurantId
+router.get("/restaurant/:restaurantId", async (req, res) => {
+  try {
+    const categories = await Category.find({ restaurantId: req.params.restaurantId });
+    res.status(200).json({ success: true, count: categories.length, data: categories });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT /api/categories/:id
+router.put("/:id", protect, async (req, res) => {
+  try {
+    const category = await Category.findById(req.params.id);
+    if (!category) {
+      return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    const restaurant = await Restaurant.findById(category.restaurantId);
+    if (!restaurant || restaurant.userId.toString() !== req.user.userId) {
+      return res.status(403).json({ success: false, message: "Not authorized to modify this category" });
+    }
+
+    const updatedCategory = await Category.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+    res.status(200).json({ success: true, data: updatedCategory });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+module.exports = router;
