@@ -50,7 +50,7 @@ async function getChatParticipant(orderId, channel, userId) {
   // The restaurant owner talks to the rider delivering their order.
   if (channel === "restaurant_rider") {
     const restaurant = await Restaurant.findOne({ userId: callerId });
-    if (restaurant && order.restaurantId.toString() === restaurant._id.toString()) {
+    if (restaurant && order.restaurantId && order.restaurantId.toString() === restaurant._id.toString()) {
       return { ok: true, order, senderRole: "restaurant" };
     }
   }
